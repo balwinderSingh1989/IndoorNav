@@ -1,0 +1,421 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show Offset;
+
+import 'package:flutter/foundation.dart';
+
+import '../models/beacon.dart';
+import '../models/store_map.dart';
+import 'ble_scanner_service.dart';
+import 'motion_service.dart';
+import 'activity_logger.dart';
+import 'pathfinding_service.dart';
+import 'zone_snap_service.dart';
+
+/// Central MVP state: current zone (from BLE), chosen destination, the
+/// resulting route, and the live PDR-tracked position. Rebuilds the UI via
+/// [ChangeNotifier] whenever any of those change.
+class NavigationController extends ChangeNotifier {
+  NavigationController({
+    required this.storeMap,
+    required this.bleScanner,
+    required this.motionService,
+    ZoneSnapService? zoneSnap,
+    PathfindingService? pathfinder,
+    this.enableOffRouteDetection = true,
+    this.logger,
+  })  : _zoneSnap = zoneSnap ?? ZoneSnapService(),
+        _pathfinder = pathfinder ?? PathfindingService() {
+    _rssiSub = bleScanner.rssiStream.listen(_onRssiUpdate);
+    _stepSub = motionService.stepDistances.listen(_onStep);
+    _motionErrorSub = motionService.errors.listen(
+      (e) => _log('NAV## motion error: $e'),
+    );
+  }
+
+  /// A newly-"nearest" beacon must win this many consecutive RSSI updates
+  /// before it's actually committed to [currentBeacon] — a single noisy
+  /// reading was enough to flip zones (and misreport which beacon you were
+  /// near) without this.
+  static const int _requiredConsecutiveReadings = 2;
+
+  /// How much stronger a new candidate beacon's RSSI must be before the app
+  /// is willing to switch away from the current one.
+  static const double _beaconSwitchThresholdDb = 8.0;
+  static const Duration _candidatePersistence = Duration(milliseconds: 900);
+  static const Duration _beaconSwitchCooldown = Duration(milliseconds: 1500);
+  static const double _walkingSpeedMetersPerSecond = 1.3;
+  static const Duration _followTickInterval = Duration(milliseconds: 50);
+
+
+  final StoreMap storeMap;
+  final BleScannerService bleScanner;
+  final MotionService motionService;
+  final ZoneSnapService _zoneSnap;
+  final PathfindingService _pathfinder;
+  bool enableOffRouteDetection;
+  final ActivityLogger? logger;
+  StreamSubscription<Map<String, double>>? _rssiSub;
+  StreamSubscription<double>? _stepSub;
+  StreamSubscription<String>? _motionErrorSub;
+  Timer? _followTimer;
+  DateTime? _lastFollowTick;
+
+  final _zoneEnteredController = StreamController<Beacon>.broadcast();
+
+  /// Fires exactly once each time [currentBeacon] is freshly confirmed as a
+  /// *new* zone (not on every RSSI update while already in one) — the UI
+  /// listens for this to show zone-arrival notifications (e.g. nearby
+  /// offers) without re-showing one on every rebuild.
+  Stream<Beacon> get zoneEnteredStream => _zoneEnteredController.stream;
+
+  String? _pendingBeaconId;
+  int _pendingBeaconCount = 0;
+  DateTime? _pendingBeaconSince;
+  DateTime? _lastBeaconSwitchAt;
+  int _rssiUpdateCount = 0;
+
+  Beacon? currentBeacon;
+  Beacon? destinationBeacon;
+  List<Beacon> currentPath = [];
+
+  /// Total distance of [currentPath], in meters. Null when there's no route.
+  double? currentDistanceMeters;
+
+  /// Where the arrow is gliding toward — set on each beacon confirmation.
+  Offset? _targetPosition;
+
+  /// Arrow position — eased toward [_targetPosition] by the follow timer.
+  Offset? liveUserPosition;
+
+  /// Arrow heading derived from route geometry: current position → next waypoint.
+  /// More reliable indoors than the magnetic compass.
+  double? get headingDegrees {
+    final live = liveUserPosition;
+    final next = _nextRouteWaypoint();
+    if (live == null || next == null) return null;
+    final dx = next.dx - live.dx;
+    final dy = next.dy - live.dy;
+    if (dx * dx + dy * dy < 1.0) return null;
+    // map y increases downward; convert map-space vector to compass heading
+    final mapAngleDeg = math.atan2(dx, -dy) * 180 / math.pi;
+    return ((mapAngleDeg + storeMap.mapNorthOffsetDegrees) % 360 + 360) % 360;
+  }
+
+  void start() {
+    bleScanner.startScan();
+    motionService.start();
+    _followTimer ??= Timer.periodic(_followTickInterval, (_) => _advanceTowardTarget());
+    _log('NAV: started — ${storeMap.beacons.length} beacons, metersPerUnit=${storeMap.metersPerUnit}');
+  }
+
+  void setDestination(Beacon beacon) {
+    destinationBeacon = beacon;
+    _log('NAV## destination set → ${beacon.name}');
+    _recomputePath();
+    notifyListeners();
+  }
+
+  void setOffRouteDetection(bool enabled) {
+    if (enableOffRouteDetection == enabled) return;
+    enableOffRouteDetection = enabled;
+    _log('NAV## off-route detection ${enabled ? "enabled" : "disabled"}');
+    notifyListeners();
+  }
+
+  void clearDestination() {
+    _log('NAV## route cleared (was: ${destinationBeacon?.name ?? "none"})');  
+    destinationBeacon = null;
+    currentPath = [];
+    currentDistanceMeters = null;
+    notifyListeners();
+  }
+
+  void _onRssiUpdate(Map<String, double> rssiByBleId) {
+    _rssiUpdateCount++;
+    final now = DateTime.now();
+    final candidate = _selectBeaconCandidate(rssiByBleId);
+    // Heartbeat: log RSSI state + route snapshot so log gaps make route problems visible.
+    if (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0) {
+      _log('NAV: RSSI #$_rssiUpdateCount — ${rssiByBleId.length} beacons visible'
+          ' | beacon=${currentBeacon?.name ?? "none"}'
+          ' | currentRssi=${_rssiForBeacon(currentBeacon, rssiByBleId)?.toStringAsFixed(1) ?? "none"}'
+          ' | candidate=${candidate?.name ?? "none"}'
+          ' | candidateRssi=${candidate == null ? "none" : _rssiForBeacon(candidate, rssiByBleId)?.toStringAsFixed(1) ?? "none"}'
+          ' | dest=${destinationBeacon?.name ?? "none"}'
+          ' | path=${currentPath.length} nodes'
+          ' | livePos=${liveUserPosition != null ? "set" : "null"}');
+    }
+    // Prefer the strongest visible beacon as the current location source,
+    // but still require stability before switching to avoid noisy oscillation.
+    var justConfirmedBeacon = false;
+    // Once arrived, lock the beacon so RSSI noise doesn't flip us back to a
+    // neighbouring beacon, causing the route line to flicker on and off.
+    final arrived = currentBeacon != null &&
+        currentBeacon?.id == destinationBeacon?.id;
+    if (arrived && candidate != null && candidate.id != currentBeacon?.id) {
+      if (justConfirmedBeacon) notifyListeners();
+      return;
+    }
+    if (candidate != null) {
+      if (candidate.id == currentBeacon?.id) {
+        _pendingBeaconId = null;
+        _pendingBeaconCount = 0;
+        _pendingBeaconSince = null;
+      } else if (_shouldSwitchBeacon(currentBeacon, candidate, rssiByBleId)) {
+        if (candidate.id == _pendingBeaconId) {
+          _pendingBeaconCount++;
+        } else {
+          _pendingBeaconId = candidate.id;
+          _pendingBeaconCount = 1;
+          _pendingBeaconSince = now;
+          _log('NAV## candidate ${candidate.name} vs ${currentBeacon?.name ?? "none"}'
+              ' current=${_rssiForBeacon(currentBeacon, rssiByBleId)?.toStringAsFixed(1) ?? "none"}dBm'
+              ' candidate=${_rssiForBeacon(candidate, rssiByBleId)?.toStringAsFixed(1) ?? "none"}dBm'
+              ' — persistence started');
+        }
+        final candidateAge = _pendingBeaconSince == null
+            ? Duration.zero
+            : now.difference(_pendingBeaconSince!);
+        final inCooldown = _lastBeaconSwitchAt != null &&
+            now.difference(_lastBeaconSwitchAt!) < _beaconSwitchCooldown;
+        if (_pendingBeaconCount >= _requiredConsecutiveReadings &&
+            candidateAge >= _candidatePersistence &&
+            !inCooldown) {
+          final prevPath = List<Beacon>.from(currentPath);
+          _pendingBeaconId = null;
+          _pendingBeaconCount = 0;
+          _pendingBeaconSince = null;
+          // Ignore entirely only if the beacon is behind the user on the route.
+          final alreadyPassed = liveUserPosition != null &&
+              _isAlreadyPassed(candidate, prevPath, liveUserPosition!);
+          if (alreadyPassed) {
+            _log('NAV: beacon ${candidate.name} confirmed — ignored (already passed)');
+          } else {
+            currentBeacon = candidate;
+            _lastBeaconSwitchAt = now;
+            _recomputePath();
+            _snapToCurrentBeacon();
+            justConfirmedBeacon = true;
+            _zoneEnteredController.add(candidate);
+            _log('NAV## beacon confirmed → ${candidate.name}');
+          }
+        } else if (_pendingBeaconCount >= _requiredConsecutiveReadings &&
+            (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0)) {
+          _log('NAV## candidate ${candidate.name} held ${candidateAge.inMilliseconds}ms'
+              ' cooldown=$inCooldown — waiting for stable zone decision');
+        }
+      } else {
+        _pendingBeaconId = null;
+        _pendingBeaconCount = 0;
+        _pendingBeaconSince = null;
+      }
+    }
+
+    if (justConfirmedBeacon) notifyListeners();
+  }
+
+  Beacon? _selectBeaconCandidate(Map<String, double> rssiByBleId) {
+    final navigating = destinationBeacon != null && currentPath.length > 1;
+    if (!navigating || enableOffRouteDetection) {
+      return _zoneSnap.strongestBeacon(rssiByBleId, storeMap);
+    }
+
+    final routeIds = currentPath.map((beacon) => beacon.id).toSet();
+    Beacon? candidate;
+    double? bestRssi;
+    for (final entry in rssiByBleId.entries) {
+      final beacon = storeMap.beaconByBleId(entry.key);
+      if (beacon == null || !routeIds.contains(beacon.id)) continue;
+      if (bestRssi == null || entry.value > bestRssi) {
+        bestRssi = entry.value;
+        candidate = beacon;
+      }
+    }
+
+    if (candidate == null) {
+      _log('NAV## route-only candidate none — off-route detection disabled');
+    }
+    return candidate;
+  }
+
+  void _snapToCurrentBeacon() {
+    final beacon = currentBeacon;
+    if (beacon == null) return;
+    final snap = beacon.position;
+    if (liveUserPosition == null || (liveUserPosition! - snap).distance > 0.25) {
+      liveUserPosition = snap;
+    }
+    _targetPosition = snap;
+    _lastFollowTick = null;
+  }
+
+  /// Advances the arrow one step along the current route — direction is
+  /// always toward the next route waypoint so compass is not needed.
+  void _onStep(double distanceMeters) {
+    final base = _targetPosition ?? liveUserPosition ?? currentBeacon?.position;
+    if (base == null) return;
+    final next = _nextRouteWaypoint();
+    if (next == null) return;
+    final toNext = next - base;
+    final dist = toNext.distance;
+    if (dist < 0.001) return;
+    final distUnits = distanceMeters / storeMap.metersPerUnit;
+    final moveBy = math.min(distUnits, dist);
+    _targetPosition = base + toNext / dist * moveBy;
+  }
+
+  /// Eases [liveUserPosition] toward the confirmed beacon at walking pace.
+  void _advanceTowardTarget() {
+    final target = _targetPosition;
+    if (target == null) return;
+    final current = liveUserPosition;
+    if (current == null) {
+      liveUserPosition = target;
+      notifyListeners();
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastFollowTick;
+    _lastFollowTick = now;
+    final dtSeconds = last == null
+        ? _followTickInterval.inMilliseconds / 1000.0
+        : now.difference(last).inMicroseconds / 1e6;
+    final dt = dtSeconds.clamp(0.0, 0.12);
+    final toTarget = target - current;
+    final remaining = toTarget.distance;
+    if (remaining < 0.001) return;
+    final maxMove = (_walkingSpeedMetersPerSecond / storeMap.metersPerUnit) * dt;
+    final moveBy = math.min(maxMove, remaining);
+    liveUserPosition = current + toTarget / remaining * moveBy;
+    notifyListeners();
+  }
+
+  bool _shouldSwitchBeacon(
+    Beacon? current,
+    Beacon candidate,
+    Map<String, double> rssiByBleId,
+  ) {
+    if (current == null) return true;
+    final currentRssi = _rssiForBeacon(current, rssiByBleId);
+    final candidateRssi = _rssiForBeacon(candidate, rssiByBleId);
+    if (candidateRssi == null) return false;
+    if (currentRssi == null) return true;
+    return candidateRssi >= currentRssi + _beaconSwitchThresholdDb;
+  }
+
+  double? _rssiForBeacon(Beacon? beacon, Map<String, double> rssiByBleId) {
+    if(beacon == null) return null;
+    for (final entry in rssiByBleId.entries) {
+      if (beacon.matchesBleId(entry.key)) return entry.value;
+    }
+    return null;
+  }
+
+  /// The next position to walk toward on the current route.
+  /// Uses [currentBeacon] as anchor when it is on the path; after an
+  /// off-path reroute where [currentBeacon] is no longer part of the
+  /// recomputed path, falls back to the node nearest [liveUserPosition].
+  Offset? _nextRouteWaypoint() {
+    final path = currentPath;
+    if (path.length < 2) {
+      // Arrived — keep aiming at the destination so PDR doesn't fall back
+      // to the unreliable compass when the arrow hasn't reached it yet.
+      return path.length == 1 ? path.first.position : null;
+    }
+
+    final cb = currentBeacon;
+    if (cb != null) {
+      final index = path.indexWhere((b) => b.id == cb.id);
+      if (index != -1 && index < path.length - 1) return path[index + 1].position;
+    }
+
+    // currentBeacon not on this path (post-reroute) — find the node nearest
+    // to liveUserPosition and aim at the one immediately after it.
+    final live = liveUserPosition;
+    if (live != null) {
+      var nearestIdx = 0;
+      var nearestDist = double.infinity;
+      for (var i = 0; i < path.length - 1; i++) {
+        final d = (path[i].position - live).distanceSquared;
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearestIdx = i;
+        }
+      }
+      return path[nearestIdx + 1].position;
+    }
+
+    return null;
+  }
+
+  /// Returns true when [beacon] sits at a lower path index than the node
+  /// nearest to [livePos] — meaning the user has already walked past it.
+  bool _isAlreadyPassed(Beacon beacon, List<Beacon> path, Offset livePos) {
+    if (path.length < 2) return false;
+    final beaconIndex = path.indexWhere((b) => b.id == beacon.id);
+    if (beaconIndex == -1) return false;
+    var nearestIndex = 0;
+    var nearestDist = double.infinity;
+    for (var i = 0; i < path.length; i++) {
+      final d = (path[i].position - livePos).distanceSquared;
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestIndex = i;
+      }
+    }
+    return beaconIndex < nearestIndex;
+  }
+
+  void _log(String message) {
+    debugPrint('[NAV] $message');
+    logger?.log(message);
+  }
+
+  /// Recomputes [currentPath]/[currentDistanceMeters] for the current
+  /// [currentBeacon] → [destinationBeacon] pair. Deliberately leaves the
+  /// existing route on screen untouched if there's no beacon fix yet or no
+  /// path could be found — the route should only ever go away because the
+  /// user cleared it ([clearDestination]) or picked a different
+  /// destination ([setDestination]), never because of a transient
+  /// recompute glitch mid-walk.
+  void _recomputePath() {
+    final start = currentBeacon;
+    final end = destinationBeacon;
+    if (end == null) {
+      _log('NAV: _recomputePath skipped — no destination');
+      return;
+    }
+    if (start == null) {
+      _log('NAV: _recomputePath skipped — no beacon fix yet (path stays: ${currentPath.length} nodes)');
+      return;
+    }
+
+    final result = _pathfinder.findPath(storeMap, start.id, end.id);
+    if (result.path.isEmpty) {
+      _log('NAV: _recomputePath — no path from ${start.name} to ${end.name}; keeping existing route (${currentPath.length} nodes)');
+      return;
+    }
+
+    final prev = currentPath.map((b) => b.name).join(" → ");
+    currentPath = result.path;
+    currentDistanceMeters = result.distanceUnits * storeMap.metersPerUnit;
+    final next = currentPath.map((b) => b.name).join(" → ");
+    if (prev != next) {
+      _log('NAV## path changed: $prev → $next (${currentDistanceMeters?.toStringAsFixed(0)} m)');
+    } else {
+      _log('NAV: path → $next (${currentDistanceMeters?.toStringAsFixed(0)} m) [unchanged]');
+    }
+  }
+
+  @override
+  void dispose() {
+    _rssiSub?.cancel();
+    _stepSub?.cancel();
+    _motionErrorSub?.cancel();
+    _followTimer?.cancel();
+    _zoneEnteredController.close();
+    bleScanner.dispose();
+    super.dispose();
+  }
+}

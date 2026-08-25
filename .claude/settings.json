@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --location https://agents.kore.ai/api/v1/project/ace-hardware-poc/dev/workflow/get-product-listing/invoke --header 'Content-Type: application/json' --header 'x-api-key: pk_df3e02b35f5793293aea4b98fcc6ebc06490b653d6dce93c' --data '{\"input\":{\"categoryId\":6202}}')"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph status --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || echo 'Not a git repo, skipping'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

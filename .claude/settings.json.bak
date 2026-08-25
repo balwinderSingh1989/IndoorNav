@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --location https://agents.kore.ai/api/v1/project/ace-hardware-poc/dev/workflow/get-product-listing/invoke --header 'Content-Type: application/json' --header 'x-api-key: pk_df3e02b35f5793293aea4b98fcc6ebc06490b653d6dce93c' --data '{\"input\":{\"categoryId\":6202}}')"
+    ]
+  }
+}
