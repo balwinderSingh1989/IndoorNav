@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 
 import 'models/store_map.dart';
-import 'services/activity_logger.dart';
-import 'services/ble_scanner_service.dart';
+import 'services/magnetic_fingerprint_controller.dart';
+import 'services/magnetic_fingerprint_service.dart';
 import 'services/motion_service.dart';
-import 'services/navigation_controller.dart';
 import 'services/store_data_repository.dart';
-import 'ui/screens/home_screen.dart';
+import 'services/wifi_fingerprint_controller.dart';
+import 'services/wifi_fingerprint_service.dart';
+import 'ui/screens/magnetic_fingerprint_screen.dart';
 
 class IndoorNavApp extends StatefulWidget {
   const IndoorNavApp({super.key});
@@ -20,12 +21,13 @@ class _IndoorNavAppState extends State<IndoorNavApp> {
   // which would cause FutureBuilder to reset and recreate the
   // NavigationController without ever calling start() on it.
   late final Future<StoreMap> _storeMapFuture = StoreDataRepository().loadStoreMap();
-  NavigationController? _controller;
-  final ActivityLogger _logger = ActivityLogger();
+  MagneticFingerprintController? _controller;
+  WifiFingerprintController? _wifiController;
 
   @override
   void dispose() {
     _controller?.dispose();
+    _wifiController?.dispose();
     super.dispose();
   }
 
@@ -44,16 +46,16 @@ class _IndoorNavAppState extends State<IndoorNavApp> {
           if (storeMap == null) {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
-          _controller ??= NavigationController(
+          _controller ??= MagneticFingerprintController(
             storeMap: storeMap,
-            bleScanner: BleScannerService(),
+            service: MagneticFingerprintService(),
             motionService: MotionService(
               metersPerUnit: storeMap.metersPerUnit,
               mapNorthOffsetDegrees: storeMap.mapNorthOffsetDegrees,
             ),
-            logger: _logger,
           );
-          return HomeScreen(controller: _controller!, activityLogger: _logger);
+          _wifiController ??= WifiFingerprintController(service: WifiFingerprintService());
+          return MagneticFingerprintScreen(controller: _controller!, wifiController: _wifiController!);
         },
       ),
     );

@@ -154,7 +154,6 @@ class NavigationController extends ChangeNotifier {
     final arrived = currentBeacon != null &&
         currentBeacon?.id == destinationBeacon?.id;
     if (arrived && candidate != null && candidate.id != currentBeacon?.id) {
-      if (justConfirmedBeacon) notifyListeners();
       return;
     }
     if (candidate != null) {

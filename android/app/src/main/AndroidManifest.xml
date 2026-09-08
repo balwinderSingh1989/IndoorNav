@@ -16,6 +16,9 @@
          results at all; since BLUETOOTH_SCAN above isn't neverForLocation,
          Android 12+ also expects this to be requested at runtime. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Android 13+: required by WiFi scan APIs; wifi_scan requests it when
+         WiFi mode is selected. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     <!-- Required (API 29+) to read the step-counter/step-detector sensors
          used for pedestrian dead reckoning (MotionService). -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />

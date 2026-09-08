@@ -17,6 +17,10 @@ class MapPainter extends CustomPainter {
     this.livePosition,
     this.headingDegrees,
     this.mapNorthOffsetDegrees = 0,
+    this.capturePosition,
+    this.capturePath = const [],
+    this.anchorPosition,
+    this.anchorLabel,
   });
 
   final Size mapSize;
@@ -42,6 +46,13 @@ class MapPainter extends CustomPainter {
   /// Compass bearing that corresponds to the map's "up" (-y) direction,
   /// used to convert [headingDegrees] into the map's coordinate frame.
   final double mapNorthOffsetDegrees;
+
+  /// User-selected map coordinate awaiting a labeled magnetic capture.
+  final Offset? capturePosition;
+
+  final List<Offset> capturePath;
+  final Offset? anchorPosition;
+  final String? anchorLabel;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -112,6 +123,55 @@ class MapPainter extends CustomPainter {
         }
       }
     }
+
+    final selected = capturePosition;
+    if (selected != null) {
+      final p = scale(selected);
+      final paint = Paint()
+        ..color = Colors.amber
+        ..strokeWidth = 3
+        ..style = PaintingStyle.stroke;
+      canvas.drawCircle(p, 12, paint);
+      canvas.drawLine(Offset(p.dx - 17, p.dy), Offset(p.dx + 17, p.dy), paint);
+      canvas.drawLine(Offset(p.dx, p.dy - 17), Offset(p.dx, p.dy + 17), paint);
+    }
+
+    if (capturePath.length > 1) {
+      final routePaint = Paint()
+        ..color = Colors.amber
+        ..strokeWidth = 4
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+      final route = Path()..moveTo(scale(capturePath.first).dx, scale(capturePath.first).dy);
+      for (final point in capturePath.skip(1)) {
+        final scaled = scale(point);
+        route.lineTo(scaled.dx, scaled.dy);
+      }
+      canvas.drawPath(route, routePaint);
+      for (final point in capturePath) {
+        canvas.drawCircle(scale(point), 6, Paint()..color = Colors.white);
+        canvas.drawCircle(scale(point), 4, Paint()..color = Colors.amber.shade800);
+      }
+    }
+
+    final anchor = anchorPosition;
+    if (anchor != null) {
+      final point = scale(anchor);
+      canvas.drawCircle(point, 15, Paint()
+        ..color = Colors.blueAccent
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3);
+      canvas.drawCircle(point, 5, Paint()..color = Colors.blueAccent);
+      final label = anchorLabel;
+      if (label != null && label.isNotEmpty) {
+        final painter = TextPainter(
+          text: TextSpan(text: label, style: const TextStyle(color: Colors.blueAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: 140);
+        painter.paint(canvas, Offset(point.dx + 10, point.dy - painter.height - 8));
+      }
+    }
   }
 
   /// The waypoints of the edge between beacons [aId] and [bId], ordered
@@ -177,6 +237,10 @@ class MapPainter extends CustomPainter {
         oldDelegate.livePosition != livePosition ||
         oldDelegate.headingDegrees != headingDegrees ||
         oldDelegate.mapNorthOffsetDegrees != mapNorthOffsetDegrees ||
+        oldDelegate.capturePosition != capturePosition ||
+        oldDelegate.capturePath != capturePath ||
+        oldDelegate.anchorPosition != anchorPosition ||
+        oldDelegate.anchorLabel != anchorLabel ||
         oldDelegate.mapSize != mapSize;
   }
 }

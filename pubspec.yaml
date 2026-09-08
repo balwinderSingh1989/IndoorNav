@@ -18,6 +18,9 @@ dependencies:
   sensors_plus: ^7.1.0
   path_provider: ^2.1.6
   xml: ^6.5.0
+  wifi_scan: ^0.4.1+2
+  shared_preferences: ^2.5.3
+  file_picker: ^10.3.3
 
 dependency_overrides:
   reactive_ble_mobile:
