@@ -125,6 +125,9 @@ class MagneticFingerprintService {
       final anchorDistance = anchorPosition == null ? 0.0 : (candidatePosition - anchorPosition).distance;
       if (anchorPosition != null && anchorDistance > anchorRadiusMapUnits) continue;
       final jump = previousPosition == null ? 0.0 : (candidatePosition - previousPosition).distance;
+      if (previousPosition != null && jump > _maxReachableMagneticJumpMapUnits) {
+        continue;
+      }
       // A rolling window advances gradually. A large endpoint jump is a poor
       // hypothesis even when its magnetic sequence happens to look similar.
       final continuityPenalty = previousPosition == null ? 0.0 : math.pow(jump / _continuityJumpMapUnits, 2).toDouble();
@@ -213,6 +216,7 @@ class MagneticFingerprintService {
   }
 
   static const double _continuityJumpMapUnits = 35.0;
+  static const double _maxReachableMagneticJumpMapUnits = 90.0;
 
   ({double distance, int referenceIndex}) _dtw(
     List<MagneticSample> live,

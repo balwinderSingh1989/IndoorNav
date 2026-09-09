@@ -29,8 +29,10 @@ class _MagneticFingerprintScreenState extends State<MagneticFingerprintScreen> {
   void initState() {
     super.initState();
     widget.controller.start();
-    widget.wifiController.addListener(_applyWifiAnchor);
-    if (!Platform.isIOS) widget.wifiController.start();
+    if (!Platform.isIOS) {
+      widget.wifiController.addListener(_applyWifiAnchor);
+      widget.wifiController.start();
+    }
   }
 
   void _applyWifiAnchor() {
@@ -49,9 +51,13 @@ class _MagneticFingerprintScreenState extends State<MagneticFingerprintScreen> {
   PositioningMode _mode = PositioningMode.magnetic;
 
   void _setMode(PositioningMode mode) {
+    if (Platform.isIOS && mode == PositioningMode.wifi) {
+      setState(() => _mode = PositioningMode.magnetic);
+      return;
+    }
     setState(() => _mode = mode);
     if (mode != PositioningMode.wifi) widget.controller.start();
-    if (mode != PositioningMode.magnetic) widget.wifiController.start();
+    if (!Platform.isIOS && mode != PositioningMode.magnetic) widget.wifiController.start();
   }
 
   void _selectCapturePoint(Offset position) {

@@ -44,7 +44,8 @@ class NavigationController extends ChangeNotifier {
   static const double _beaconSwitchThresholdDb = 8.0;
   static const Duration _candidatePersistence = Duration(milliseconds: 900);
   static const Duration _beaconSwitchCooldown = Duration(milliseconds: 1500);
-  static const double _walkingSpeedMetersPerSecond = 1.3;
+  static const double _visualBlendPerTick = 0.35;
+  static const double _maxBeaconCorrectionResetMeters = 4.0;
   static const Duration _followTickInterval = Duration(milliseconds: 50);
 
 
@@ -59,7 +60,6 @@ class NavigationController extends ChangeNotifier {
   StreamSubscription<double>? _stepSub;
   StreamSubscription<String>? _motionErrorSub;
   Timer? _followTimer;
-  DateTime? _lastFollowTick;
 
   final _zoneEnteredController = StreamController<Beacon>.broadcast();
 
@@ -78,6 +78,7 @@ class NavigationController extends ChangeNotifier {
   Beacon? currentBeacon;
   Beacon? destinationBeacon;
   List<Beacon> currentPath = [];
+  double _segmentProgressMeters = 0.0;
 
   /// Total distance of [currentPath], in meters. Null when there's no route.
   double? currentDistanceMeters;
@@ -242,52 +243,79 @@ class NavigationController extends ChangeNotifier {
     final beacon = currentBeacon;
     if (beacon == null) return;
     final snap = beacon.position;
-    if (liveUserPosition == null || (liveUserPosition! - snap).distance > 0.25) {
+    final current = liveUserPosition ?? _targetPosition ?? beacon.position;
+    final drift = (current - snap).distance;
+
+    // Never hard-jump the visual position on a routine beacon confirmation.
+    // Keep the previously rendered point as the start of the correction and
+    // let the normal route-following interpolation pull the user dot toward
+    // the newly-confirmed beacon. Only do a full reset when the discrepancy is
+    // large enough to indicate the tracker actually lost the route.
+    _targetPosition = snap;
+    _segmentProgressMeters = 0.0;
+
+    if (drift > _maxBeaconCorrectionResetMeters) {
+      // This is a real recovery case: move to the anchor immediately so the
+      // route doesn't stretch across a wide gap, but still keep it as a
+      // single-target motion correction rather than a direct map-space jump.
       liveUserPosition = snap;
     }
-    _targetPosition = snap;
-    _lastFollowTick = null;
   }
 
-  /// Advances the arrow one step along the current route — direction is
-  /// always toward the next route waypoint so compass is not needed.
+  /// Advances the user along the currently active route segment using a known,
+  /// bounded segment length rather than raw step distance. This keeps the dot
+  /// from overshooting the next beacon purely because the pedometer slightly
+  /// overestimates the user's stride on the current walk segment.
   void _onStep(double distanceMeters) {
-    final base = _targetPosition ?? liveUserPosition ?? currentBeacon?.position;
-    if (base == null) return;
+    final startBeacon = currentBeacon;
+    if (startBeacon == null) return;
     final next = _nextRouteWaypoint();
     if (next == null) return;
-    final toNext = next - base;
-    final dist = toNext.distance;
-    if (dist < 0.001) return;
-    final distUnits = distanceMeters / storeMap.metersPerUnit;
-    final moveBy = math.min(distUnits, dist);
-    _targetPosition = base + toNext / dist * moveBy;
+
+    final segment = _segmentLengthMeters(startBeacon, next);
+    if (segment <= 0.0) return;
+
+    final segmentProgress = (_segmentProgressMeters + distanceMeters).clamp(0.0, segment);
+    _segmentProgressMeters = segmentProgress;
+
+    final fraction = (segmentProgress / segment).clamp(0.0, 1.0);
+    final projected = Offset.lerp(startBeacon.position, next, fraction)!;
+    _targetPosition = projected;
+    liveUserPosition ??= projected;
   }
 
-  /// Eases [liveUserPosition] toward the confirmed beacon at walking pace.
+  /// Applies a small visual blend toward the step-driven target. The target is
+  /// the single source of truth; the blend only smooths the rendered position so
+  /// the dot doesn't twitch, and it never reintroduces a fixed wall-clock speed
+  /// assumption (which would drift away from the actual measured step path).
   void _advanceTowardTarget() {
     final target = _targetPosition;
     if (target == null) return;
-    final current = liveUserPosition;
-    if (current == null) {
-      liveUserPosition = target;
-      notifyListeners();
-      return;
-    }
-    final now = DateTime.now();
-    final last = _lastFollowTick;
-    _lastFollowTick = now;
-    final dtSeconds = last == null
-        ? _followTickInterval.inMilliseconds / 1000.0
-        : now.difference(last).inMicroseconds / 1e6;
-    final dt = dtSeconds.clamp(0.0, 0.12);
+    final current = liveUserPosition ?? target;
     final toTarget = target - current;
     final remaining = toTarget.distance;
     if (remaining < 0.001) return;
-    final maxMove = (_walkingSpeedMetersPerSecond / storeMap.metersPerUnit) * dt;
-    final moveBy = math.min(maxMove, remaining);
+    final moveBy = remaining * _visualBlendPerTick;
     liveUserPosition = current + toTarget / remaining * moveBy;
     notifyListeners();
+  }
+
+  double _segmentLengthMeters(Beacon start, Offset endPosition) {
+    final endBeacon = _pathBeaconAfter(start.id);
+    if (endBeacon != null) {
+      final edge = storeMap.edgeBetween(start.id, endBeacon.id);
+      if (edge != null) return edge.distanceMeters;
+      return (endBeacon.position - start.position).distance * storeMap.metersPerUnit;
+    }
+    final direct = (endPosition - start.position).distance * storeMap.metersPerUnit;
+    return direct > 0 ? direct : 0.0;
+  }
+
+  Beacon? _pathBeaconAfter(String beaconId) {
+    if (currentPath.length < 2) return null;
+    final index = currentPath.indexWhere((beacon) => beacon.id == beaconId);
+    if (index == -1 || index >= currentPath.length - 1) return null;
+    return currentPath[index + 1];
   }
 
   bool _shouldSwitchBeacon(
@@ -398,7 +426,7 @@ class NavigationController extends ChangeNotifier {
 
     final prev = currentPath.map((b) => b.name).join(" → ");
     currentPath = result.path;
-    currentDistanceMeters = result.distanceUnits * storeMap.metersPerUnit;
+    currentDistanceMeters = result.distanceMeters;
     final next = currentPath.map((b) => b.name).join(" → ");
     if (prev != next) {
       _log('NAV## path changed: $prev → $next (${currentDistanceMeters?.toStringAsFixed(0)} m)');

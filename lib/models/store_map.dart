@@ -3,7 +3,7 @@ import 'dart:ui' show Offset;
 import 'beacon.dart';
 import 'item.dart';
 
-/// A weighted, undirected edge between two beacons in the aisle graph.
+/// An undirected aisle edge between two beacons with a physical distance.
 ///
 /// [waypoints] are purely geometric — intermediate points (in order from
 /// [from] to [to]) that bend the corridor's *shape* around obstacles a
@@ -16,17 +16,17 @@ import 'item.dart';
 class Edge {
   final String from;
   final String to;
-  final double weight;
+  final double distanceMeters;
   final List<Offset> waypoints;
 
-  const Edge({required this.from, required this.to, required this.weight, this.waypoints = const []});
+  const Edge({required this.from, required this.to, required this.distanceMeters, this.waypoints = const []});
 
   factory Edge.fromJson(Map<String, dynamic> json) {
     final rawWaypoints = json['waypoints'] as List?;
     return Edge(
       from: json['from'] as String,
       to: json['to'] as String,
-      weight: (json['weight'] as num).toDouble(),
+      distanceMeters: (json['distanceMeters'] as num).toDouble(),
       waypoints: rawWaypoints == null
           ? const []
           : rawWaypoints
@@ -177,7 +177,7 @@ class StoreMap {
     for (final e in edges) {
       map.putIfAbsent(e.from, () => []).add(e);
       map.putIfAbsent(e.to, () => []).add(
-            Edge(from: e.to, to: e.from, weight: e.weight, waypoints: e.waypoints.reversed.toList()),
+        Edge(from: e.to, to: e.from, distanceMeters: e.distanceMeters, waypoints: e.waypoints.reversed.toList()),
           );
     }
     return map;

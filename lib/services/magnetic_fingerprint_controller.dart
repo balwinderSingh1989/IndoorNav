@@ -57,6 +57,10 @@ class MagneticFingerprintController extends ChangeNotifier {
   double anchorConfidence = 0;
   int capturedStepCount = 0;
   double capturedStepDistanceMeters = 0;
+
+  bool get isBeaconConfident => anchorConfidence >= 0.60;
+  bool get isBeaconAmbiguous => anchorConfidence >= 0.35 && anchorConfidence < 0.60;
+
   int get fingerprintCount => service.fingerprints.length;
   int get trajectoryCount => service.trajectories.length;
   int get captureSampleCount => _captureSamples.length;
@@ -89,20 +93,24 @@ class MagneticFingerprintController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Receives a coarse fix from an external anchor provider. WiFi supplies
-  /// this during the current POC; beacon navigation can replace it later.
+  /// Receives a coarse fix from an external anchor provider. In the final
+  /// design, beacon RSSI is authoritative and magnetic is only a tie-breaker
+  /// when the beacon is ambiguous.
   void updateAnchor(Offset position, {double confidence = 1}) {
+    final normalizedConfidence = confidence.clamp(0.0, 1.0);
     final anchorMoved = _lastAppliedAnchor == null || (_lastAppliedAnchor! - position).distance >= 12;
     anchorPosition = position;
-    anchorConfidence = confidence.clamp(0.0, 1.0);
-    // A landmark reset is deliberately stronger than a normal sensor update.
-    // Beacon and WiFi providers can both use this same contract.
-    final firstAnchor = _lastAppliedAnchor == null && anchorConfidence >= 0.35;
-    final confidentReset = anchorConfidence >= 0.60 && anchorMoved;
+    anchorConfidence = normalizedConfidence;
+
+    final firstAnchor = _lastAppliedAnchor == null && normalizedConfidence >= 0.35;
+    final confidentReset = normalizedConfidence >= 0.60 && anchorMoved;
     if (firstAnchor || confidentReset) {
       estimatedPosition = position;
       _pdrPosition = position;
       _lastAppliedAnchor = position;
+    } else if (normalizedConfidence < 0.35) {
+      anchorPosition = null;
+      _lastAppliedAnchor = null;
     }
     notifyListeners();
   }
@@ -137,26 +145,41 @@ class MagneticFingerprintController extends ChangeNotifier {
     _liveSamples.add(sample);
     if (_liveSamples.length > 80) _liveSamples.removeAt(0);
     _samplesSinceMagneticCorrection++;
-    if (_samplesSinceMagneticCorrection >= 8) {
+
+    final lastKnownPosition = _pdrPosition ?? estimatedPosition;
+    final shouldUseMagneticTieBreak = isBeaconAmbiguous && anchorPosition != null && lastKnownPosition != null;
+
+    if (_samplesSinceMagneticCorrection >= 8 && shouldUseMagneticTieBreak) {
       _samplesSinceMagneticCorrection = 0;
       final trajectoryMatch = service.matchSequence(
         _liveSamples,
-        previousPosition: _pdrPosition ?? estimatedPosition,
-        anchorPosition: anchorConfidence >= 0.35 ? anchorPosition : null,
+        previousPosition: lastKnownPosition,
+        anchorPosition: anchorPosition,
       );
       if (trajectoryMatch != null && trajectoryMatch.confidence >= 0.35) {
         currentTrajectoryMatch = trajectoryMatch;
-        final base = _pdrPosition ?? estimatedPosition ?? trajectoryMatch.position;
-        estimatedPosition = Offset.lerp(base, trajectoryMatch.position, 0.25);
-        _pdrPosition = estimatedPosition;
+        final base = lastKnownPosition;
+        final candidatePosition = trajectoryMatch.position;
+        final reachable = (candidatePosition - base).distance <= 140;
+        if (reachable) {
+          estimatedPosition = Offset.lerp(base, candidatePosition, 0.25);
+          _pdrPosition = estimatedPosition;
+        }
       } else {
         currentTrajectoryMatch = null;
       }
+    } else {
+      currentTrajectoryMatch = null;
     }
+
+    // A confident beacon reading is authoritative. Magnetic mismatches must
+    // never override it, even when a trajectory fits the signatures.
     final match = service.match(sample);
-    if (match != null && service.trajectories.isEmpty) {
+    if (match != null && service.trajectories.isEmpty && !isBeaconConfident) {
       currentMatch = match;
       estimatedPosition = match.position;
+    } else if (isBeaconConfident) {
+      currentMatch = null;
     }
     notifyListeners();
   }

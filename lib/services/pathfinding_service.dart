@@ -1,15 +1,14 @@
 import '../models/beacon.dart';
 import '../models/store_map.dart';
 
-/// A computed route: the beacon-by-beacon path, and its total edge-weight
-/// distance (map units — multiply by [StoreMap.metersPerUnit] for meters).
+/// A computed route: the beacon-by-beacon path and its total distance in meters.
 class RouteResult {
   final List<Beacon> path;
-  final double distanceUnits;
+  final double distanceMeters;
 
-  const RouteResult({required this.path, required this.distanceUnits});
+  const RouteResult({required this.path, required this.distanceMeters});
 
-  static const empty = RouteResult(path: [], distanceUnits: 0);
+  static const empty = RouteResult(path: [], distanceMeters: 0);
 }
 
 /// Shortest path between two beacons over the aisle graph, via Dijkstra.
@@ -19,7 +18,7 @@ class PathfindingService {
   RouteResult findPath(StoreMap storeMap, String startId, String endId) {
     if (startId == endId) {
       final only = storeMap.beaconById(startId);
-      return only == null ? RouteResult.empty : RouteResult(path: [only], distanceUnits: 0);
+      return only == null ? RouteResult.empty : RouteResult(path: [only], distanceMeters: 0);
     }
 
     final adjacency = storeMap.adjacency;
@@ -37,7 +36,7 @@ class PathfindingService {
 
       for (final edge in adjacency[currentId] ?? const []) {
         if (visited.contains(edge.to)) continue;
-        final candidate = distances[currentId]! + edge.weight;
+        final candidate = distances[currentId]! + edge.distanceMeters;
         if (candidate < (distances[edge.to] ?? double.infinity)) {
           distances[edge.to] = candidate;
           previous[edge.to] = currentId;
@@ -48,7 +47,7 @@ class PathfindingService {
     if (!previous.containsKey(endId) && startId != endId) return RouteResult.empty;
     final path = _reconstructPath(storeMap, previous, startId, endId);
     if (path.isEmpty) return RouteResult.empty;
-    return RouteResult(path: path, distanceUnits: distances[endId] ?? 0);
+    return RouteResult(path: path, distanceMeters: distances[endId] ?? 0);
   }
 
   String? _closestUnvisited(Map<String, double> distances, Set<String> visited) {

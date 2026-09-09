@@ -132,7 +132,8 @@ Edit `assets/store_data.json`:
   computed from the gaps between the room rectangles in `floorMap.svg`
   (beacons are mounted on the walkway between rooms, not inside them) —
   adjust to match actual mounting locations once surveyed.
-- `edges` describe walkable aisle connections and their distance/weight;
+- `edges` describe walkable aisle connections and their physical
+  `distanceMeters`; the pathfinder treats them as undirected.
   the pathfinder treats them as undirected.
 - `edges[].waypoints` (optional, e.g. `[{"x":235,"y":115},{"x":235,"y":75}]`)
   bends an edge's *shape* through intermediate points, ordered from `from`
@@ -339,20 +340,14 @@ something to fake in software).
 
 Once a destination is picked, the status card above the map shows total
 route distance (e.g. "142 m"), computed from `PathfindingService.findPath`'s
-`RouteResult.distanceUnits` (the sum of edge weights Dijkstra already
-computes to find the shortest path — no separate calculation) multiplied by
-`metersPerUnit`. Since that scale factor is only roughly calibrated (see
-above), treat this distance as approximate too.
+`RouteResult.distanceMeters` (the sum of each edge's physical
+`distanceMeters` value that Dijkstra uses to find the shortest path).
 
 - **If the distance looks way off** (e.g. reported ~44 m for a route
   expected to be ~24 m): check which beacon is actually set as
   `destinationBeacon` first, before suspecting `metersPerUnit`. With the
-  current graph (`b2↔b3` 132 units, `b3↔b4` 103, `b4↔b1` 188), `b2→b4` is
-  235 units × `0.104` ≈ **24 m** — already correct — while `b2→b1` (the
-  graph's two *opposite ends*, via `b3` and `b4`) is 423 units × `0.104` ≈
-  **44 m**. That exact match is what a wrong-destination selection looks
-  like; it isn't reproducible from a `metersPerUnit`/edge-weight bug given
-  the numbers above.
+  current graph's physical edge distances should be checked against the
+  expected walking route before suspecting map-coordinate calibration.
 - **The route no longer disappears on its own.** `_recomputePath`
   (`NavigationController`) used to blank `currentPath`/`currentDistanceMeters`
   whenever `currentBeacon` was momentarily null or `PathfindingService`
