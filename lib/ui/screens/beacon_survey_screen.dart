@@ -23,6 +23,9 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
   late Beacon _selectedBeacon;
   late final Map<String, Offset> _surveyedPositions;
   late final List<TextEditingController> _distanceControllers;
+  late final Map<int, List<Offset>> _surveyedWaypoints;
+  int? _selectedEdgeIndex;
+  bool _waypointMode = false;
   List<BeaconScanInfo> _nearbyBeacons = const [];
   StreamSubscription<List<BeaconScanInfo>>? _scanInfoSub;
 
@@ -37,6 +40,10 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
       for (final edge in widget.storeMap.edges)
         TextEditingController(text: edge.distanceMeters.toString()),
     ];
+    _surveyedWaypoints = {
+      for (var i = 0; i < widget.storeMap.edges.length; i++)
+        i: List<Offset>.from(widget.storeMap.edges[i].waypoints),
+    };
     _nearbyBeacons = widget.bleScanner.latestScanInfo;
     _scanInfoSub = widget.bleScanner.scanInfoStream.listen((infos) {
       if (mounted) setState(() => _nearbyBeacons = infos);
@@ -64,8 +71,25 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
 
   void _recordTap(TapUpDetails details, Size size) {
     setState(() {
-      _surveyedPositions[_selectedBeacon.id] = _mapPosition(details.localPosition, size);
+      final point = _mapPosition(details.localPosition, size);
+      if (_waypointMode && _selectedEdgeIndex != null) {
+        _surveyedWaypoints[_selectedEdgeIndex!]!.add(point);
+      } else {
+        _surveyedPositions[_selectedBeacon.id] = point;
+      }
     });
+  }
+
+  void _clearWaypoints() {
+    final index = _selectedEdgeIndex;
+    if (index == null) return;
+    setState(() => _surveyedWaypoints[index]!.clear());
+  }
+
+  void _undoWaypoint() {
+    final index = _selectedEdgeIndex;
+    if (index == null || _surveyedWaypoints[index]!.isEmpty) return;
+    setState(() => _surveyedWaypoints[index]!.removeLast());
   }
 
   Future<void> _copyExport() async {
@@ -88,9 +112,10 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
             'from': widget.storeMap.edges[i].from,
             'to': widget.storeMap.edges[i].to,
             'distanceMeters': double.tryParse(_distanceControllers[i].text.trim()) ?? widget.storeMap.edges[i].distanceMeters,
-            if (widget.storeMap.edges[i].waypoints.isNotEmpty)
+            if (_surveyedWaypoints[i]!.isNotEmpty)
               'waypoints': [
-                for (final point in widget.storeMap.edges[i].waypoints) {'x': point.dx, 'y': point.dy},
+                for (final point in _surveyedWaypoints[i]!)
+                  {'x': double.parse(point.dx.toStringAsFixed(2)), 'y': double.parse(point.dy.toStringAsFixed(2))},
               ],
           },
       ],
@@ -148,6 +173,8 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final size = Size(constraints.maxWidth, constraints.maxHeight);
+                final selectedEdge = _selectedEdgeIndex == null ? null : widget.storeMap.edges[_selectedEdgeIndex!];
+                final selectedWaypoints = _selectedEdgeIndex == null ? const <Offset>[] : _surveyedWaypoints[_selectedEdgeIndex!]!;
                 return GestureDetector(
                   onTapUp: (details) => _recordTap(details, size),
                   child: Stack(
@@ -155,7 +182,7 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                     children: [
                       ClipRRect(
                         borderRadius: BorderRadius.circular(12),
-                        child: SvgPicture.asset(widget.storeMap.mapAsset, fit: BoxFit.fill),
+                        child: SvgPicture.asset(widget.storeMap.mapAsset, fit: BoxFit.contain),
                       ),
                       for (final beacon in widget.storeMap.beacons)
                         Positioned(
@@ -174,6 +201,35 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                             ),
                           ),
                         ),
+                      if (selectedEdge != null) ...[
+                        for (final point in [
+                          _surveyedPositions[selectedEdge.from]!,
+                          ...selectedWaypoints,
+                          _surveyedPositions[selectedEdge.to]!,
+                        ])
+                          Positioned(
+                            left: _screenPosition(point, size).dx - 5,
+                            top: _screenPosition(point, size).dy - 5,
+                            child: IgnorePointer(
+                              child: Container(
+                                width: 10,
+                                height: 10,
+                                decoration: const BoxDecoration(color: Colors.orange, shape: BoxShape.circle),
+                              ),
+                            ),
+                          ),
+                        if (selectedWaypoints.length > 1)
+                          CustomPaint(
+                            painter: _SurveyPolylinePainter(
+                              points: [
+                                _surveyedPositions[selectedEdge.from]!,
+                                ...selectedWaypoints,
+                                _surveyedPositions[selectedEdge.to]!,
+                              ],
+                              mapSize: Size(widget.storeMap.mapWidth, widget.storeMap.mapHeight),
+                            ),
+                          ),
+                      ],
                     ],
                   ),
                 );
@@ -199,6 +255,38 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                 onChanged: (_) => setState(() {}),
               ),
             ),
+          const SizedBox(height: 16),
+          Text('Waypoint editing', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          const Text('Select an edge, enable waypoint mode, then tap corridor bends on the map in order.'),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            initialValue: _selectedEdgeIndex,
+            decoration: const InputDecoration(labelText: 'Edge to shape', border: OutlineInputBorder()),
+            items: [
+              for (var i = 0; i < widget.storeMap.edges.length; i++)
+                DropdownMenuItem(value: i, child: Text('${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to}')),
+            ],
+            onChanged: (index) => setState(() => _selectedEdgeIndex = index),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Waypoint mode'),
+            subtitle: Text(_selectedEdgeIndex == null
+                ? 'Select an edge first'
+                : '${_surveyedWaypoints[_selectedEdgeIndex!]!.length} waypoint(s) recorded'),
+            value: _waypointMode,
+            onChanged: _selectedEdgeIndex == null ? null : (enabled) => setState(() => _waypointMode = enabled),
+          ),
+          Row(
+            children: [
+              OutlinedButton.icon(onPressed: _waypointMode ? _undoWaypoint : null, icon: const Icon(Icons.undo), label: const Text('Undo')),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(onPressed: _waypointMode ? _clearWaypoints : null, icon: const Icon(Icons.clear), label: const Text('Clear')),
+            ],
+          ),
+          if (_selectedEdgeIndex != null)
+            Text('Waypoints: ${_surveyedWaypoints[_selectedEdgeIndex!]!.map((point) => '(${point.dx.toStringAsFixed(1)}, ${point.dy.toStringAsFixed(1)})').join(' -> ')}'),
           const SizedBox(height: 16),
           Text('Nearby beacons', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
@@ -236,4 +324,36 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
       ),
     );
   }
+}
+
+class _SurveyPolylinePainter extends CustomPainter {
+  const _SurveyPolylinePainter({required this.points, required this.mapSize});
+
+  final List<Offset> points;
+  final Size mapSize;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.length < 2) return;
+    final paint = Paint()
+      ..color = Colors.orange
+      ..strokeWidth = 3
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    Offset scale(Offset point) => Offset(
+          point.dx * size.width / mapSize.width,
+          point.dy * size.height / mapSize.height,
+        );
+    final path = Path()..moveTo(scale(points.first).dx, scale(points.first).dy);
+    for (final point in points.skip(1)) {
+      final scaled = scale(point);
+      path.lineTo(scaled.dx, scaled.dy);
+    }
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SurveyPolylinePainter oldDelegate) =>
+      oldDelegate.points != points || oldDelegate.mapSize != mapSize;
 }
