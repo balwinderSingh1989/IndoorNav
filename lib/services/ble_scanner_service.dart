@@ -11,6 +11,30 @@ class _TimedRssi {
   _TimedRssi(this.time, this.rssi);
 }
 
+class BeaconScanInfo {
+  const BeaconScanInfo({
+    required this.key,
+    required this.scannerId,
+    required this.name,
+    required this.rssi,
+    required this.lastSeen,
+  });
+
+  final String key;
+  final String scannerId;
+  final String name;
+  final double rssi;
+  final DateTime lastSeen;
+
+  BeaconScanInfo copyWith({double? rssi}) => BeaconScanInfo(
+        key: key,
+        scannerId: scannerId,
+        name: name,
+        rssi: rssi ?? this.rssi,
+        lastSeen: lastSeen,
+      );
+}
+
 /// Scans for nearby beacons and emits a rolling average RSSI per beacon
 /// identity. Consumers (see [ZoneSnapService]) turn this into a location.
 ///
@@ -45,13 +69,20 @@ class BleScannerService {
   };
 
   final Map<String, List<_TimedRssi>> _readings = {};
+  final Map<String, BeaconScanInfo> _scanInfoByKey = {};
   final _rssiController = StreamController<Map<String, double>>.broadcast();
+  final _scanInfoController = StreamController<List<BeaconScanInfo>>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   StreamSubscription<DiscoveredDevice>? _scanSub;
+  List<BeaconScanInfo> _latestScanInfo = const [];
 
   /// Averaged RSSI per beacon identity ("uuid:major:minor"), updated on
   /// every scan result.
   Stream<Map<String, double>> get rssiStream => _rssiController.stream;
+
+  Stream<List<BeaconScanInfo>> get scanInfoStream => _scanInfoController.stream;
+
+  List<BeaconScanInfo> get latestScanInfo => List.unmodifiable(_latestScanInfo);
 
   /// Human-readable reasons scanning couldn't start or was interrupted —
   /// e.g. a denied permission or disabled Bluetooth adapter. Surfaced here
@@ -137,8 +168,21 @@ class BleScannerService {
     final history = _readings.putIfAbsent(key, () => []);
     history.add(_TimedRssi(now, device.rssi));
     history.removeWhere((r) => now.difference(r.time) > rollingWindow);
+    _scanInfoByKey[key] = BeaconScanInfo(
+      key: key,
+      scannerId: device.id,
+      name: device.name,
+      rssi: device.rssi.toDouble(),
+      lastSeen: now,
+    );
 
-    _rssiController.add(_averagedRssi());
+    final averaged = _averagedRssi();
+    _rssiController.add(averaged);
+    _latestScanInfo = [
+      for (final entry in averaged.entries)
+        _scanInfoByKey[entry.key]!.copyWith(rssi: entry.value),
+    ]..sort((a, b) => b.rssi.compareTo(a.rssi));
+    _scanInfoController.add(_latestScanInfo);
   }
 
   Map<String, double> _averagedRssi() {
@@ -166,6 +210,7 @@ class BleScannerService {
   void dispose() {
     stopScan();
     _rssiController.close();
+    _scanInfoController.close();
     _errorController.close();
   }
 }

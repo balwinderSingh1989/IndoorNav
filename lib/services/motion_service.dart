@@ -21,7 +21,7 @@ class MotionService {
     required this.metersPerUnit,
     required this.mapNorthOffsetDegrees,
     this.stepLengthMeters = 0.75,
-  });
+  }) : _calibratedStepLengthMeters = stepLengthMeters;
 
   /// Real-world meters per one map/SVG coordinate unit (see [StoreMap]).
   final double metersPerUnit;
@@ -33,6 +33,10 @@ class MotionService {
   /// Assumed distance covered per step. A rough average adult stride;
   /// personalize/calibrate later if needed.
   final double stepLengthMeters;
+  double _calibratedStepLengthMeters;
+  final List<double> _strideSamples = [];
+
+  double get calibratedStepLengthMeters => _calibratedStepLengthMeters;
 
   final _stepDistanceController = StreamController<double>.broadcast();
   final _headingController = StreamController<double>.broadcast();
@@ -95,8 +99,18 @@ class MotionService {
     if (newSteps <= 0) return;
 
     for (var i = 0; i < newSteps; i++) {
-      _stepDistanceController.add(stepLengthMeters);
+      _stepDistanceController.add(_calibratedStepLengthMeters);
     }
+  }
+
+  /// Adds a measured beacon-to-beacon stride sample and applies the median of
+  /// recent samples, which is less sensitive to a delayed or noisy beacon fix.
+  void recordStrideCalibration({required double distanceMeters, required int steps}) {
+    if (distanceMeters <= 0 || steps <= 0) return;
+    _strideSamples.add(distanceMeters / steps);
+    if (_strideSamples.length > 9) _strideSamples.removeAt(0);
+    final sorted = List<double>.from(_strideSamples)..sort();
+    _calibratedStepLengthMeters = sorted[sorted.length ~/ 2];
   }
 
   /// Integrates rotation rate into the fused heading — fires far more

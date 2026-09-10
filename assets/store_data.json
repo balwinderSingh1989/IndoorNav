@@ -14,23 +14,23 @@
     "mountOffsetYUnits": 20
   },
   "beacons": [
-    { "id": "b1", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e0", "major": 0, "minor": 0, "name": "Breakout", "x": 135, "y": 43 },
-    { "id": "b2", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e1", "major": 0, "minor": 1, "name": "Seating 2-A", "x": 200, "y": 43 },
-    { "id": "b3", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e2", "major": 0, "minor": 2, "name": "Gemma Room", "x": 200, "y": 146 },
-    { "id": "b4", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e3", "major": 0, "minor": 3, "name": "SOC ", "x": 200, "y": 60 },
-    { "id": "b5", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e4", "major": 0, "minor": 4, "name": "Interim", "x": 200, "y": 95 },
-    { "id": "b6", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e5", "major": 0, "minor": 5, "name": "Safari", "x": 250, "y": 146 },
-    { "id": "b7", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e6", "major": 0, "minor": 6, "name": "Seating 2", "x": 250, "y": 43 },
-    { "id": "b8", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e7", "major": 0, "minor": 7, "name": "ChatGPT", "x": 160, "y": 147 }
+    { "id": "b1", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e0", "major": 0, "minor": 0, "name": "Breakout", "x": 89.4, "y": 49.1 },
+    { "id": "b2", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e1", "major": 0, "minor": 1, "name": "Seating 2-A", "x": 175.4, "y": 39.5 },
+    { "id": "b3", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e2", "major": 0, "minor": 2, "name": "Gemma Room", "x": 221.4, "y": 125.1 },
+    { "id": "b4", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e3", "major": 0, "minor": 3, "name": "SOC ", "x": 218.1, "y": 60 },
+    { "id": "b5", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e4", "major": 0, "minor": 4, "name": "Interim", "x": 224.4, "y": 93.5 },
+    { "id": "b6", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e5", "major": 0, "minor": 5, "name": "Safari", "x": 262.3, "y": 155.9 },
+    { "id": "b7", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e6", "major": 0, "minor": 6, "name": "Seating 2", "x": 285.8, "y": 40.9 },
+    { "id": "b8", "bleId": "e2c56db5-dffb-48d2-b060-d0f5a71096e7", "major": 0, "minor": 7, "name": "ChatGPT", "x": 84.9, "y": 154.9 }
   ],
   "edges": [
-    { "from": "b2", "to": "b7", "distanceMeters": 6.0 },
+    { "from": "b2", "to": "b7", "distanceMeters": 14.0 },
     { "from": "b2", "to": "b1", "distanceMeters": 6.0 },
     { "from": "b2", "to": "b4", "distanceMeters": 3.0 },
-    { "from": "b3", "to": "b6", "distanceMeters": 6.0 },
-    { "from": "b8", "to": "b3", "distanceMeters": 6.0 },
-    { "from": "b3", "to": "b5", "distanceMeters": 2.307692307692304 },
-    { "from": "b5", "to": "b4", "distanceMeters": 2.307692307692304 }
+    { "from": "b3", "to": "b6", "distanceMeters": 8.0 },
+    { "from": "b8", "to": "b3", "distanceMeters": 7.3 },
+    { "from": "b3", "to": "b5", "distanceMeters": 3.6 },
+    { "from": "b5", "to": "b4", "distanceMeters": 3.6 }
     
   ]
 }

@@ -12,6 +12,8 @@ import 'activity_logger.dart';
 import 'pathfinding_service.dart';
 import 'zone_snap_service.dart';
 
+enum NavigationStatus { idle, navigating, checkingLocation, rerouting, arrived }
+
 /// Central MVP state: current zone (from BLE), chosen destination, the
 /// resulting route, and the live PDR-tracked position. Rebuilds the UI via
 /// [ChangeNotifier] whenever any of those change.
@@ -22,7 +24,7 @@ class NavigationController extends ChangeNotifier {
     required this.motionService,
     ZoneSnapService? zoneSnap,
     PathfindingService? pathfinder,
-    this.enableOffRouteDetection = true,
+    this.allowOffRouteBeacons = false,
     this.logger,
   })  : _zoneSnap = zoneSnap ?? ZoneSnapService(),
         _pathfinder = pathfinder ?? PathfindingService() {
@@ -31,6 +33,9 @@ class NavigationController extends ChangeNotifier {
     _motionErrorSub = motionService.errors.listen(
       (e) => _log('NAV## motion error: $e'),
     );
+    _headingSub = motionService.headingStream.listen((heading) {
+      _motionHeadingDegrees = heading;
+    });
   }
 
   /// A newly-"nearest" beacon must win this many consecutive RSSI updates
@@ -54,11 +59,12 @@ class NavigationController extends ChangeNotifier {
   final MotionService motionService;
   final ZoneSnapService _zoneSnap;
   final PathfindingService _pathfinder;
-  bool enableOffRouteDetection;
+  bool allowOffRouteBeacons;
   final ActivityLogger? logger;
   StreamSubscription<Map<String, double>>? _rssiSub;
   StreamSubscription<double>? _stepSub;
   StreamSubscription<String>? _motionErrorSub;
+  StreamSubscription<double>? _headingSub;
   Timer? _followTimer;
 
   final _zoneEnteredController = StreamController<Beacon>.broadcast();
@@ -79,6 +85,7 @@ class NavigationController extends ChangeNotifier {
   Beacon? destinationBeacon;
   List<Beacon> currentPath = [];
   double _segmentProgressMeters = 0.0;
+  int _segmentStepCount = 0;
 
   /// Total distance of [currentPath], in meters. Null when there's no route.
   double? currentDistanceMeters;
@@ -88,6 +95,11 @@ class NavigationController extends ChangeNotifier {
 
   /// Arrow position — eased toward [_targetPosition] by the follow timer.
   Offset? liveUserPosition;
+  NavigationStatus status = NavigationStatus.idle;
+  double? _motionHeadingDegrees;
+  DateTime? _segmentBoundarySince;
+
+  double get calibratedStepLengthMeters => motionService.calibratedStepLengthMeters;
 
   /// Arrow heading derived from route geometry: current position → next waypoint.
   /// More reliable indoors than the magnetic compass.
@@ -112,15 +124,16 @@ class NavigationController extends ChangeNotifier {
 
   void setDestination(Beacon beacon) {
     destinationBeacon = beacon;
+    status = NavigationStatus.rerouting;
     _log('NAV## destination set → ${beacon.name}');
     _recomputePath();
     notifyListeners();
   }
 
   void setOffRouteDetection(bool enabled) {
-    if (enableOffRouteDetection == enabled) return;
-    enableOffRouteDetection = enabled;
-    _log('NAV## off-route detection ${enabled ? "enabled" : "disabled"}');
+    if (allowOffRouteBeacons == enabled) return;
+    allowOffRouteBeacons = enabled;
+    _log('NAV## off-route beacon candidates ${enabled ? "enabled" : "disabled"}');
     notifyListeners();
   }
 
@@ -129,6 +142,8 @@ class NavigationController extends ChangeNotifier {
     destinationBeacon = null;
     currentPath = [];
     currentDistanceMeters = null;
+    status = NavigationStatus.idle;
+    _segmentBoundarySince = null;
     notifyListeners();
   }
 
@@ -183,6 +198,7 @@ class NavigationController extends ChangeNotifier {
             candidateAge >= _candidatePersistence &&
             !inCooldown) {
           final prevPath = List<Beacon>.from(currentPath);
+          final previousBeacon = currentBeacon;
           _pendingBeaconId = null;
           _pendingBeaconCount = 0;
           _pendingBeaconSince = null;
@@ -192,10 +208,12 @@ class NavigationController extends ChangeNotifier {
           if (alreadyPassed) {
             _log('NAV: beacon ${candidate.name} confirmed — ignored (already passed)');
           } else {
+            _recordCompletedSegmentCalibration(previousBeacon, candidate);
             currentBeacon = candidate;
             _lastBeaconSwitchAt = now;
             _recomputePath();
             _snapToCurrentBeacon();
+            status = candidate.id == destinationBeacon?.id ? NavigationStatus.arrived : NavigationStatus.navigating;
             justConfirmedBeacon = true;
             _zoneEnteredController.add(candidate);
             _log('NAV## beacon confirmed → ${candidate.name}');
@@ -217,7 +235,7 @@ class NavigationController extends ChangeNotifier {
 
   Beacon? _selectBeaconCandidate(Map<String, double> rssiByBleId) {
     final navigating = destinationBeacon != null && currentPath.length > 1;
-    if (!navigating || enableOffRouteDetection) {
+    if (!navigating || allowOffRouteBeacons) {
       return _zoneSnap.strongestBeacon(rssiByBleId, storeMap);
     }
 
@@ -253,6 +271,8 @@ class NavigationController extends ChangeNotifier {
     // large enough to indicate the tracker actually lost the route.
     _targetPosition = snap;
     _segmentProgressMeters = 0.0;
+    _segmentStepCount = 0;
+    _segmentBoundarySince = null;
 
     if (drift > _maxBeaconCorrectionResetMeters) {
       // This is a real recovery case: move to the anchor immediately so the
@@ -275,13 +295,26 @@ class NavigationController extends ChangeNotifier {
     final segment = _segmentLengthMeters(startBeacon, next);
     if (segment <= 0.0) return;
 
+    if (_isMovingAwayFromRoute(startBeacon)) return;
+
+    _segmentStepCount++;
     final segmentProgress = (_segmentProgressMeters + distanceMeters).clamp(0.0, segment);
     _segmentProgressMeters = segmentProgress;
 
     final fraction = (segmentProgress / segment).clamp(0.0, 1.0);
-    final projected = Offset.lerp(startBeacon.position, next, fraction)!;
+    final projected = _pointAlongCurrentEdge(startBeacon, next, fraction);
     _targetPosition = projected;
     liveUserPosition ??= projected;
+    if (status != NavigationStatus.arrived) status = NavigationStatus.navigating;
+  }
+
+  void _recordCompletedSegmentCalibration(Beacon? previous, Beacon candidate) {
+    if (previous == null || _segmentStepCount <= 0 || currentPath.length < 2) return;
+    final nextIndex = currentPath.indexWhere((beacon) => beacon.id == previous.id) + 1;
+    if (nextIndex <= 0 || nextIndex >= currentPath.length || currentPath[nextIndex].id != candidate.id) return;
+    final edge = storeMap.edgeBetween(previous.id, candidate.id);
+    if (edge == null || _segmentProgressMeters < edge.distanceMeters * 0.5) return;
+    motionService.recordStrideCalibration(distanceMeters: edge.distanceMeters, steps: _segmentStepCount);
   }
 
   /// Applies a small visual blend toward the step-driven target. The target is
@@ -294,9 +327,13 @@ class NavigationController extends ChangeNotifier {
     final current = liveUserPosition ?? target;
     final toTarget = target - current;
     final remaining = toTarget.distance;
-    if (remaining < 0.001) return;
+    if (remaining < 0.001) {
+      _updateStallStatus();
+      return;
+    }
     final moveBy = remaining * _visualBlendPerTick;
     liveUserPosition = current + toTarget / remaining * moveBy;
+    _updateStallStatus();
     notifyListeners();
   }
 
@@ -309,6 +346,63 @@ class NavigationController extends ChangeNotifier {
     }
     final direct = (endPosition - start.position).distance * storeMap.metersPerUnit;
     return direct > 0 ? direct : 0.0;
+  }
+
+  List<Offset> _currentEdgePolyline(Beacon start, Offset endPosition) {
+    final endBeacon = _pathBeaconAfter(start.id);
+    final edge = endBeacon == null ? null : storeMap.edgeBetween(start.id, endBeacon.id);
+    final waypoints = edge == null
+        ? const <Offset>[]
+        : edge.from == start.id
+            ? edge.waypoints
+            : edge.waypoints.reversed.toList();
+    return [start.position, ...waypoints, endPosition];
+  }
+
+  Offset _pointAlongCurrentEdge(Beacon start, Offset endPosition, double fraction) {
+    final points = _currentEdgePolyline(start, endPosition);
+    if (points.length < 2) return endPosition;
+    final lengths = <double>[0.0];
+    for (var i = 1; i < points.length; i++) {
+      lengths.add(lengths.last + (points[i] - points[i - 1]).distance);
+    }
+    final total = lengths.last;
+    if (total <= 0) return points.first;
+    final target = total * fraction;
+    for (var i = 1; i < lengths.length; i++) {
+      if (target <= lengths[i]) {
+        final span = lengths[i] - lengths[i - 1];
+        final local = span <= 0 ? 0.0 : (target - lengths[i - 1]) / span;
+        return Offset.lerp(points[i - 1], points[i], local)!;
+      }
+    }
+    return points.last;
+  }
+
+  bool _isMovingAwayFromRoute(Beacon start) {
+    final heading = _motionHeadingDegrees;
+    final next = _nextRouteWaypoint();
+    if (heading == null || next == null) return false;
+    final dx = next.dx - start.position.dx;
+    final dy = next.dy - start.position.dy;
+    if (dx * dx + dy * dy < 1.0) return false;
+    final routeBearing = (math.atan2(dx, -dy) * 180 / math.pi + storeMap.mapNorthOffsetDegrees + 360) % 360;
+    final difference = ((heading - routeBearing + 540) % 360) - 180;
+    return difference.abs() > 120;
+  }
+
+  void _updateStallStatus() {
+    final start = currentBeacon;
+    final next = start == null ? null : _nextRouteWaypoint();
+    if (start == null || next == null || _segmentProgressMeters < _segmentLengthMeters(start, next) - 0.05) {
+      _segmentBoundarySince = null;
+      return;
+    }
+    final now = DateTime.now();
+    _segmentBoundarySince ??= now;
+    if (now.difference(_segmentBoundarySince!) >= const Duration(seconds: 5) && status != NavigationStatus.arrived) {
+      status = NavigationStatus.checkingLocation;
+    }
   }
 
   Beacon? _pathBeaconAfter(String beaconId) {
@@ -420,6 +514,7 @@ class NavigationController extends ChangeNotifier {
 
     final result = _pathfinder.findPath(storeMap, start.id, end.id);
     if (result.path.isEmpty) {
+      status = NavigationStatus.checkingLocation;
       _log('NAV: _recomputePath — no path from ${start.name} to ${end.name}; keeping existing route (${currentPath.length} nodes)');
       return;
     }
@@ -427,6 +522,7 @@ class NavigationController extends ChangeNotifier {
     final prev = currentPath.map((b) => b.name).join(" → ");
     currentPath = result.path;
     currentDistanceMeters = result.distanceMeters;
+    status = start.id == end.id ? NavigationStatus.arrived : NavigationStatus.navigating;
     final next = currentPath.map((b) => b.name).join(" → ");
     if (prev != next) {
       _log('NAV## path changed: $prev → $next (${currentDistanceMeters?.toStringAsFixed(0)} m)');
@@ -440,6 +536,7 @@ class NavigationController extends ChangeNotifier {
     _rssiSub?.cancel();
     _stepSub?.cancel();
     _motionErrorSub?.cancel();
+    _headingSub?.cancel();
     _followTimer?.cancel();
     _zoneEnteredController.close();
     bleScanner.dispose();

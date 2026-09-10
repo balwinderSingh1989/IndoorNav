@@ -200,7 +200,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _openBeaconSettings() {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => BeaconSettingsScreen(storeMap: widget.controller.storeMap),
+        builder: (_) => BeaconSettingsScreen(
+          storeMap: widget.controller.storeMap,
+          bleScanner: widget.controller.bleScanner,
+        ),
       ),
     );
   }

@@ -10,8 +10,8 @@ void main() {
     final storeMap = await repository.loadStoreMap();
 
     expect(storeMap.mapAsset, 'assets/floorMap.svg');
-    expect(storeMap.mapWidth, 210);
-    expect(storeMap.mapHeight, 297);
+    expect(storeMap.mapWidth, 297);
+    expect(storeMap.mapHeight, 210);
     expect(storeMap.beacons, isNotEmpty);
   });
 }

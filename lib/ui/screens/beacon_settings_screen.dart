@@ -4,15 +4,19 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../models/beacon.dart';
 import '../../models/store_map.dart';
 import '../../services/beacon_placement_generator.dart';
+import '../../services/ble_scanner_service.dart';
 import '../widgets/beacon_settings_editor.dart';
+import 'beacon_survey_screen.dart';
 
 class BeaconSettingsScreen extends StatefulWidget {
   const BeaconSettingsScreen({
     super.key,
     required this.storeMap,
+    required this.bleScanner,
   });
 
   final StoreMap storeMap;
+  final BleScannerService bleScanner;
 
   @override
   State<BeaconSettingsScreen> createState() => _BeaconSettingsScreenState();
@@ -61,6 +65,15 @@ class _BeaconSettingsScreenState extends State<BeaconSettingsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Beacon settings'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.fact_check_outlined),
+            tooltip: 'Survey beacon placement',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => BeaconSurveyScreen(storeMap: widget.storeMap, bleScanner: widget.bleScanner)),
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(

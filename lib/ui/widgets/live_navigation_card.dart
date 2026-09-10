@@ -53,6 +53,14 @@ class _StatusCard extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
     final here = controller.currentBeacon?.name ?? 'Locating…';
     final there = controller.destinationBeacon?.name;
+    final status = switch (controller.status) {
+      NavigationStatus.checkingLocation => 'Checking your location…',
+      NavigationStatus.rerouting => 'Recalculating route…',
+      NavigationStatus.arrived => 'Arrived',
+      NavigationStatus.navigating => 'Navigating',
+      NavigationStatus.idle => null,
+    };
+    final stride = controller.calibratedStepLengthMeters;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -124,6 +132,25 @@ class _StatusCard extends StatelessWidget {
               ],
             ),
           ],
+          if (status != null) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(Icons.navigation_outlined, size: 16, color: colorScheme.primary),
+                const SizedBox(width: 8),
+                Text(status, style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ],
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Icon(Icons.directions_walk, size: 16, color: colorScheme.tertiary),
+              const SizedBox(width: 8),
+              Text('Step distance  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
+              Text('${stride.toStringAsFixed(2)} m', style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+            ],
+          ),
         ],
       ),
     );
