@@ -37,6 +37,7 @@ class MotionService {
   final List<double> _strideSamples = [];
 
   double get calibratedStepLengthMeters => _calibratedStepLengthMeters;
+  int get strideCalibrationSampleCount => _strideSamples.length;
 
   final _stepDistanceController = StreamController<double>.broadcast();
   final _headingController = StreamController<double>.broadcast();

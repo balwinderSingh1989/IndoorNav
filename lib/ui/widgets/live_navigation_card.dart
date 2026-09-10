@@ -61,6 +61,9 @@ class _StatusCard extends StatelessWidget {
       NavigationStatus.idle => null,
     };
     final stride = controller.calibratedStepLengthMeters;
+    final strideLabel = controller.strideCalibrationSampleCount == 0
+      ? 'default'
+      : '${controller.strideCalibrationSampleCount} samples';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -148,7 +151,7 @@ class _StatusCard extends StatelessWidget {
               Icon(Icons.directions_walk, size: 16, color: colorScheme.tertiary),
               const SizedBox(width: 8),
               Text('Step distance  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
-              Text('${stride.toStringAsFixed(2)} m', style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+              Text('${stride.toStringAsFixed(2)} m ($strideLabel)', style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
             ],
           ),
         ],

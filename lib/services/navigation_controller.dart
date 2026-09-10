@@ -24,7 +24,7 @@ class NavigationController extends ChangeNotifier {
     required this.motionService,
     ZoneSnapService? zoneSnap,
     PathfindingService? pathfinder,
-    this.allowOffRouteBeacons = false,
+    this.allowOffRouteBeacons = true,
     this.logger,
   })  : _zoneSnap = zoneSnap ?? ZoneSnapService(),
         _pathfinder = pathfinder ?? PathfindingService() {
@@ -50,7 +50,7 @@ class NavigationController extends ChangeNotifier {
   static const Duration _candidatePersistence = Duration(milliseconds: 900);
   static const Duration _beaconSwitchCooldown = Duration(milliseconds: 1500);
   static const double _visualBlendPerTick = 0.35;
-  static const double _maxBeaconCorrectionResetMeters = 4.0;
+  static const double _maxBeaconCorrectionResetMeters = 8.0;
   static const Duration _followTickInterval = Duration(milliseconds: 50);
 
 
@@ -80,6 +80,10 @@ class NavigationController extends ChangeNotifier {
   DateTime? _pendingBeaconSince;
   DateTime? _lastBeaconSwitchAt;
   int _rssiUpdateCount = 0;
+  bool _routeBeaconVisible = true;
+  bool? _lastLoggedRouteBeaconVisible;
+  int _stepEventCount = 0;
+  String? _lastRejectedRouteBeaconId;
 
   Beacon? currentBeacon;
   Beacon? destinationBeacon;
@@ -100,6 +104,8 @@ class NavigationController extends ChangeNotifier {
   DateTime? _segmentBoundarySince;
 
   double get calibratedStepLengthMeters => motionService.calibratedStepLengthMeters;
+
+  int get strideCalibrationSampleCount => motionService.strideCalibrationSampleCount;
 
   /// Arrow heading derived from route geometry: current position → next waypoint.
   /// More reliable indoors than the magnetic compass.
