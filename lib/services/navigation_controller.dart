@@ -31,11 +31,12 @@ class NavigationController extends ChangeNotifier {
     _rssiSub = bleScanner.rssiStream.listen(_onRssiUpdate);
     _stepSub = motionService.stepDistances.listen(_onStep);
     _motionErrorSub = motionService.errors.listen(
-      (e) => _log('NAV## motion error: $e'),
+          (e) => _log('NAV## motion error: $e'),
     );
-    _headingSub = motionService.headingStream.listen((heading) {
-      _motionHeadingDegrees = heading;
-    });
+    // TODO: wire up motionService.headingStream once movement-direction-based
+    // backward-walking detection is implemented — see earlier discussion.
+    // dispose() below intentionally still cancels this subscription so the
+    // wiring only needs to happen in one place once it's added.
   }
 
   /// A newly-"nearest" beacon must win this many consecutive RSSI updates
@@ -53,6 +54,12 @@ class NavigationController extends ChangeNotifier {
   static const double _maxBeaconCorrectionResetMeters = 8.0;
   static const Duration _followTickInterval = Duration(milliseconds: 50);
 
+  /// Extra buffer (meters) added on top of "plausible distance walked" when
+  /// deciding whether a candidate beacon is physically reachable. Without
+  /// this, a slightly under-calibrated stride length, or a candidate
+  /// confirming a beat or two later than the very first step, could reject
+  /// a beacon the user has genuinely just reached.
+  static const double _reachabilityToleranceMeters = 2.5;
 
   final StoreMap storeMap;
   final BleScannerService bleScanner;
@@ -64,7 +71,7 @@ class NavigationController extends ChangeNotifier {
   StreamSubscription<Map<String, double>>? _rssiSub;
   StreamSubscription<double>? _stepSub;
   StreamSubscription<String>? _motionErrorSub;
-  StreamSubscription<double>? _headingSub;
+  StreamSubscription<double>? _headingSub; // reserved — see TODO in constructor
   Timer? _followTimer;
 
   final _zoneEnteredController = StreamController<Beacon>.broadcast();
@@ -80,16 +87,20 @@ class NavigationController extends ChangeNotifier {
   DateTime? _pendingBeaconSince;
   DateTime? _lastBeaconSwitchAt;
   int _rssiUpdateCount = 0;
-  bool _routeBeaconVisible = true;
-  bool? _lastLoggedRouteBeaconVisible;
-  int _stepEventCount = 0;
-  String? _lastRejectedRouteBeaconId;
 
   Beacon? currentBeacon;
   Beacon? destinationBeacon;
   List<Beacon> currentPath = [];
   double _segmentProgressMeters = 0.0;
   int _segmentStepCount = 0;
+
+  /// Raw, unclamped distance walked (meters) since the last confirmed
+  /// beacon. Unlike [_segmentProgressMeters] — which is clamped to the
+  /// *current route edge's* length purely for arrow-positioning — this is
+  /// used only to judge whether a *different* candidate beacon is
+  /// physically plausible to have reached, so it must never be capped to
+  /// any one edge.
+  double _metersSinceBeacon = 0.0;
 
   /// Total distance of [currentPath], in meters. Null when there's no route.
   double? currentDistanceMeters;
@@ -100,7 +111,6 @@ class NavigationController extends ChangeNotifier {
   /// Arrow position — eased toward [_targetPosition] by the follow timer.
   Offset? liveUserPosition;
   NavigationStatus status = NavigationStatus.idle;
-  double? _motionHeadingDegrees;
   DateTime? _segmentBoundarySince;
 
   double get calibratedStepLengthMeters => motionService.calibratedStepLengthMeters;
@@ -144,7 +154,7 @@ class NavigationController extends ChangeNotifier {
   }
 
   void clearDestination() {
-    _log('NAV## route cleared (was: ${destinationBeacon?.name ?? "none"})');  
+    _log('NAV## route cleared (was: ${destinationBeacon?.name ?? "none"})');
     destinationBeacon = null;
     currentPath = [];
     currentDistanceMeters = null;
@@ -166,6 +176,7 @@ class NavigationController extends ChangeNotifier {
           ' | candidateRssi=${candidate == null ? "none" : _rssiForBeacon(candidate, rssiByBleId)?.toStringAsFixed(1) ?? "none"}'
           ' | dest=${destinationBeacon?.name ?? "none"}'
           ' | path=${currentPath.length} nodes'
+          ' | metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(1)}'
           ' | livePos=${liveUserPosition != null ? "set" : "null"}');
     }
     // Prefer the strongest visible beacon as the current location source,
@@ -245,12 +256,26 @@ class NavigationController extends ChangeNotifier {
       return _zoneSnap.strongestBeacon(rssiByBleId, storeMap);
     }
 
-    final routeIds = currentPath.map((beacon) => beacon.id).toSet();
+    // Strict on-route mode: only the current beacon or the immediate next
+    // beacon on the route are eligible — not the whole remaining path — so
+    // a strong-but-noisy RSSI reading from a beacon several stops ahead
+    // can't cause the route to "skip ahead."
+    final allowedIds = <String>{};
+    final cb = currentBeacon;
+    if (cb != null) {
+      allowedIds.add(cb.id);
+      final next = _pathBeaconAfter(cb.id);
+      if (next != null) allowedIds.add(next.id);
+    } else {
+      // No fix yet — allow any beacon already on the route for the first confirmation.
+      allowedIds.addAll(currentPath.map((beacon) => beacon.id));
+    }
+
     Beacon? candidate;
     double? bestRssi;
     for (final entry in rssiByBleId.entries) {
       final beacon = storeMap.beaconByBleId(entry.key);
-      if (beacon == null || !routeIds.contains(beacon.id)) continue;
+      if (beacon == null || !allowedIds.contains(beacon.id)) continue;
       if (bestRssi == null || entry.value > bestRssi) {
         bestRssi = entry.value;
         candidate = beacon;
@@ -261,6 +286,44 @@ class NavigationController extends ChangeNotifier {
       _log('NAV## route-only candidate none — off-route detection disabled');
     }
     return candidate;
+  }
+
+  /// True if, given how far the user has actually walked since the last
+  /// confirmed beacon, [candidate] is a plausible beacon to have reached —
+  /// i.e. its real walking distance from [currentBeacon] (via the corridor
+  /// graph, not a straight line through walls) does not exceed what the
+  /// pedometer says was physically covered, plus tolerance. This is what
+  /// stops a strong-but-implausible RSSI reading (e.g. bleeding through a
+  /// thin wall from an adjacent room, or a destination beacon's signal
+  /// spiking) from being accepted as a real position jump — RSSI stability
+  /// alone can never catch this, since the reading can be perfectly stable
+  /// and still physically impossible.
+  bool _isPhysicallyReachable(Beacon candidate) {
+    final anchor = currentBeacon;
+    if (anchor == null) return true; // no fix yet — nothing to compare against
+    if (anchor.id == candidate.id) return true;
+
+    double walkingDistanceMeters;
+    final routeResult = _pathfinder.findPath(storeMap, anchor.id, candidate.id);
+    if (routeResult.path.isNotEmpty) {
+      walkingDistanceMeters = routeResult.distanceMeters;
+    } else {
+      // No known corridor route between them in the graph — fall back to
+      // straight-line distance as a rough plausibility bound rather than
+      // auto-rejecting, since the graph may simply be missing an edge.
+      walkingDistanceMeters =
+          (candidate.position - anchor.position).distance * storeMap.metersPerUnit;
+    }
+
+    final plausibleMeters = _metersSinceBeacon + _reachabilityToleranceMeters;
+    final reachable = walkingDistanceMeters <= plausibleMeters;
+    if (!reachable) {
+      _log('NAV## candidate ${candidate.name} rejected — reachability check failed: '
+          '${walkingDistanceMeters.toStringAsFixed(1)}m away via graph, only '
+          '${_metersSinceBeacon.toStringAsFixed(1)}m walked since ${anchor.name} '
+          '(tolerance ${_reachabilityToleranceMeters}m)');
+    }
+    return reachable;
   }
 
   void _snapToCurrentBeacon() {
@@ -279,6 +342,7 @@ class NavigationController extends ChangeNotifier {
     _segmentProgressMeters = 0.0;
     _segmentStepCount = 0;
     _segmentBoundarySince = null;
+    _metersSinceBeacon = 0.0;
 
     if (drift > _maxBeaconCorrectionResetMeters) {
       // This is a real recovery case: move to the anchor immediately so the
@@ -293,6 +357,11 @@ class NavigationController extends ChangeNotifier {
   /// from overshooting the next beacon purely because the pedometer slightly
   /// overestimates the user's stride on the current walk segment.
   void _onStep(double distanceMeters) {
+    // Unclamped odometer, used only for the beacon-reachability check —
+    // must accumulate regardless of whether there's an active route segment
+    // to move the arrow along.
+    _metersSinceBeacon += distanceMeters;
+
     final startBeacon = currentBeacon;
     if (startBeacon == null) return;
     final next = _nextRouteWaypoint();
@@ -300,8 +369,6 @@ class NavigationController extends ChangeNotifier {
 
     final segment = _segmentLengthMeters(startBeacon, next);
     if (segment <= 0.0) return;
-
-    if (_isMovingAwayFromRoute(startBeacon)) return;
 
     _segmentStepCount++;
     final segmentProgress = (_segmentProgressMeters + distanceMeters).clamp(0.0, segment);
@@ -360,8 +427,8 @@ class NavigationController extends ChangeNotifier {
     final waypoints = edge == null
         ? const <Offset>[]
         : edge.from == start.id
-            ? edge.waypoints
-            : edge.waypoints.reversed.toList();
+        ? edge.waypoints
+        : edge.waypoints.reversed.toList();
     return [start.position, ...waypoints, endPosition];
   }
 
@@ -383,18 +450,6 @@ class NavigationController extends ChangeNotifier {
       }
     }
     return points.last;
-  }
-
-  bool _isMovingAwayFromRoute(Beacon start) {
-    final heading = _motionHeadingDegrees;
-    final next = _nextRouteWaypoint();
-    if (heading == null || next == null) return false;
-    final dx = next.dx - start.position.dx;
-    final dy = next.dy - start.position.dy;
-    if (dx * dx + dy * dy < 1.0) return false;
-    final routeBearing = (math.atan2(dx, -dy) * 180 / math.pi + storeMap.mapNorthOffsetDegrees + 360) % 360;
-    final difference = ((heading - routeBearing + 540) % 360) - 180;
-    return difference.abs() > 120;
   }
 
   void _updateStallStatus() {
@@ -419,14 +474,19 @@ class NavigationController extends ChangeNotifier {
   }
 
   bool _shouldSwitchBeacon(
-    Beacon? current,
-    Beacon candidate,
-    Map<String, double> rssiByBleId,
-  ) {
+      Beacon? current,
+      Beacon candidate,
+      Map<String, double> rssiByBleId,
+      ) {
     if (current == null) return true;
     final currentRssi = _rssiForBeacon(current, rssiByBleId);
     final candidateRssi = _rssiForBeacon(candidate, rssiByBleId);
     if (candidateRssi == null) return false;
+    // Physical plausibility gate — applies regardless of off-route mode.
+    // A candidate that RSSI-wise looks stable but that the user could not
+    // have actually walked to yet is rejected here, before it's ever given
+    // the chance to accumulate consecutive readings.
+    if (!_isPhysicallyReachable(candidate)) return false;
     if (currentRssi == null) return true;
     return candidateRssi >= currentRssi + _beaconSwitchThresholdDb;
   }
