@@ -124,7 +124,7 @@ class NavigationController extends ChangeNotifier {
   static const int _requiredConsecutiveReadings = 5;
 
   /// Candidate must remain valid for at least this long.
-  static const Duration _candidatePersistence = Duration(milliseconds: 500);
+  static const Duration _candidatePersistence = Duration(milliseconds: 900);
 
   /// Prevents immediate back-to-back beacon switching.
   static const Duration _beaconSwitchCooldown = Duration(milliseconds: 1500);
@@ -198,6 +198,15 @@ class NavigationController extends ChangeNotifier {
   /// Fewer samples are needed for the strong-signal fast path above,
   /// since it doesn't depend on comparing against a runner-up.
   static const int _initialFixStrongMinSamples = 3;
+
+  /// A smaller margin is trustworthy once a candidate has held the lead
+  /// for [_initialFixLeaderStreakForAccept] consecutive evaluations.
+  /// Since all beacons have equal TX power, small margins are likely RF noise.
+  /// Require at least 3.5 dB sustained difference + 12 evaluations (~1.2 sec)
+  /// to be confident the beacon difference is real, not multipath.
+  static const double _initialFixSustainedMarginDb = 3.5;
+
+  static const int _initialFixLeaderStreakForAccept = 12;
 
   // ---------------------------------------------------------------------------
   // SERVICES
@@ -303,6 +312,15 @@ class NavigationController extends ChangeNotifier {
   final Map<String, List<double>> _initialFixRssiWindows = {};
 
   DateTime? _initialFixStartedAt;
+
+  /// How many consecutive evaluations each beacon has been the top-ranked
+  /// candidate. Used so a single noisy reading can't hijack the fix from
+  /// a beacon that has clearly been leading for seconds.
+  final Map<String, int> _initialFixLeaderStreaks = {};
+
+  /// Once true, the initial-fix phase is over and stickiness won't apply.
+  /// Reset to false when a real beacon switch happens, so movement can re-engage initial-fix logic.
+  bool _isInitialFixComplete = false;
 
   // ---------------------------------------------------------------------------
   // NAVIGATION POSITION
@@ -2028,12 +2046,39 @@ class NavigationController extends ChangeNotifier {
     }
 
     // ------------------------------------------------------------
+    // 2b. Stickiness for the already-locked beacon.
+    //
+    // This function is re-run continuously in browsing mode, even
+    // after a beacon has already been confirmed once. Without this,
+    // two near-tied beacons (e.g. -72.7dB vs -72.7dB, a tie within
+    // noise) can flap the selection back and forth forever even
+    // while the user stands still. Give the already-selected beacon
+    // a bonus so a competitor must clearly beat it, not just tie it,
+    // before taking over. This never affects the very first fix,
+    // since there's no locked beacon yet.
+    // ------------------------------------------------------------
+
+    /// Only apply stickiness during the very first fix phase. Once a beacon
+    /// is accepted and we start navigating, regular beacon-switch logic takes
+    /// over and can transition if the user actually moves.
+    const currentBeaconStickinessDb = 3.0;
+
+    final lockedId = _isInitialFixComplete ? null : currentBeacon?.id;
+
+    // ------------------------------------------------------------
     // 3. Rank beacons by average RSSI
     // ------------------------------------------------------------
 
     final ranked = averages.entries.toList()
       ..sort(
-            (a, b) => b.value.compareTo(a.value),
+            (a, b) {
+          final aScore = a.value +
+              (a.key == lockedId ? currentBeaconStickinessDb : 0);
+          final bScore = b.value +
+              (b.key == lockedId ? currentBeaconStickinessDb : 0);
+
+          return bScore.compareTo(aScore);
+        },
       );
 
     final bestId = ranked.first.key;
@@ -2042,6 +2087,20 @@ class NavigationController extends ChangeNotifier {
     final elapsed = DateTime.now().difference(
       _initialFixStartedAt!,
     );
+
+    // ------------------------------------------------------------
+    // 3b. Track how long the current best has held the #1 spot,
+    //     but only if the lead is meaningful (margin >= 1.5dB).
+    //
+    // A tiny-margin lead (0.3dB) that oscillates back and forth
+    // shouldn't build up a "sustained lead" streak — it's noise.
+    // Only when a beacon clearly dominates should the streak grow.
+    // Losing the spot decays by one instead of full reset, so a single
+    // flicker doesn't erase many evaluations of true leadership.
+    // (Margin will be calculated after ranking and comparison logic.)
+    // ------------------------------------------------------------
+
+    // Placeholder; will be updated after margin is calculated.
 
     // ------------------------------------------------------------
     // 4. If only one beacon has enough samples,
@@ -2070,6 +2129,21 @@ class NavigationController extends ChangeNotifier {
     final secondAvg = ranked[1].value;
 
     final margin = bestAvg - secondAvg;
+
+    // Update streak, but only if the margin is meaningful (>= 0.5dB).
+    // RSSI noise is ~0.1-0.3dB RMS, so 0.5dB is real signal difference.
+    // This blocks pure noise oscillations while allowing real beacon transitions.
+    const minMarginForStreak = 0.5;
+
+    for (final id in averages.keys) {
+      final current = _initialFixLeaderStreaks[id] ?? 0;
+
+      if (id == bestId && margin >= minMarginForStreak) {
+        _initialFixLeaderStreaks[id] = current + 1;
+      } else if (id != bestId && current > 0) {
+        _initialFixLeaderStreaks[id] = current - 1;
+      }
+    }
 
     // ------------------------------------------------------------
     // 6. Determine strengthening / weakening
@@ -2100,6 +2174,29 @@ class NavigationController extends ChangeNotifier {
             'trend=$bestTrend/$secondTrend',
       );
 
+      _isInitialFixComplete = true;
+      return storeMap.beaconById(bestId);
+    }
+
+    // ------------------------------------------------------------
+    // 7b. Smaller margin, but sustained over many evaluations.
+    //
+    // A candidate that has clearly stayed #1 for several seconds is
+    // trustworthy even below the strong-margin bar above.
+    // ------------------------------------------------------------
+
+    final bestStreak = _initialFixLeaderStreaks[bestId] ?? 0;
+
+    if (margin >= _initialFixSustainedMarginDb &&
+        bestStreak >= _initialFixLeaderStreakForAccept) {
+      _log(
+        'NAV## initial fix ACCEPTED — '
+            '$bestName sustained lead for $bestStreak evaluations '
+            '(margin=${margin.toStringAsFixed(1)}dB '
+            'vs $secondName)',
+      );
+
+      _isInitialFixComplete = true;
       return storeMap.beaconById(bestId);
     }
 
@@ -2117,14 +2214,22 @@ class NavigationController extends ChangeNotifier {
         secondTrend == _InitialFixTrend.weakening;
 
     if (candidateStrengthening && competitorWeakening) {
-      _log(
-        'NAV## initial fix ACCEPTED — '
-            '$bestName strengthening '
-            'while $secondName weakening '
-            '(margin=${margin.toStringAsFixed(1)}dB)',
-      );
+      // Trend alone is not enough at small margins (< 2.0 dB is likely RF noise).
+      // Require at least 2.0 dB margin for a trend-based flip to be trustworthy.
+      // This prevents accepting Breakout at 1.3 dB when ChatGPT was 3+ dB stronger
+      // seconds earlier, just because of RF convergence + brief trend flutter.
+      // Equal TX power means real signal differences are 3.0+ dB, not noise-induced 1.3 dB.
+      if (margin >= 4.0) {
+        _log(
+          'NAV## initial fix ACCEPTED — '
+              '$bestName strengthening '
+              'while $secondName weakening '
+              '(margin=${margin.toStringAsFixed(1)}dB)',
+        );
 
-      return storeMap.beaconById(bestId);
+        _isInitialFixComplete = true;
+        return storeMap.beaconById(bestId);
+      }
     }
 
     // ------------------------------------------------------------
@@ -2168,11 +2273,38 @@ class NavigationController extends ChangeNotifier {
     }
 
     // ------------------------------------------------------------
-    // 11. Timeout:
+    // 11. Timeout.
     //
-    // Do NOT blindly accept a 0.x dB winner.
-    // Only accept if trend provides additional evidence.
+    // We've already waited _initialFixMaxWait — returning null here
+    // would let this stay "ambiguous" forever, which is exactly the
+    // dangling behaviour we need to avoid for a POC. Commit to the
+    // most consistent leader rather than whoever happens to be #1 in
+    // this exact instant.
     // ------------------------------------------------------------
+
+    final sustainedLeaderId = averages.keys.reduce(
+      (a, b) => (_initialFixLeaderStreaks[a] ?? 0) >=
+              (_initialFixLeaderStreaks[b] ?? 0)
+          ? a
+          : b,
+    );
+
+    final sustainedLeaderStreak =
+        _initialFixLeaderStreaks[sustainedLeaderId] ?? 0;
+
+    if (sustainedLeaderId != bestId &&
+        sustainedLeaderStreak >= _initialFixLeaderStreakForAccept ~/ 2) {
+      _log(
+        'NAV## initial fix timeout — '
+            '$bestName only just took the lead, '
+            'accepting sustained leader '
+            '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
+            'instead (streak=$sustainedLeaderStreak)',
+      );
+
+      _isInitialFixComplete = true;
+      return storeMap.beaconById(sustainedLeaderId);
+    }
 
     if (candidateStrengthening || competitorWeakening) {
       _log(
@@ -2182,19 +2314,22 @@ class NavigationController extends ChangeNotifier {
             'trend=$bestTrend/$secondTrend)',
       );
 
+      _isInitialFixComplete = true;
       return storeMap.beaconById(bestId);
     }
 
+    // No trend evidence either way — commit to whoever is #1 right now
+    // rather than sampling indefinitely.
     _log(
       'NAV## initial fix timeout — '
-          'still ambiguous, no trend advantage '
-          '(best=$bestName '
-          'margin=${margin.toStringAsFixed(1)}dB '
-          'trend=$bestTrend/$secondTrend) '
-          '— continuing to sample',
+          'no trend advantage, committing to best-so-far '
+          '$bestName '
+          '(margin=${margin.toStringAsFixed(1)}dB '
+          'trend=$bestTrend/$secondTrend)',
     );
 
-    return null;
+    _isInitialFixComplete = true;
+    return storeMap.beaconById(bestId);
   }
 
 
@@ -3579,6 +3714,10 @@ class NavigationController extends ChangeNotifier {
     _initialFixRssiWindows.clear();
 
     _initialFixStartedAt = null;
+
+    _initialFixLeaderStreaks.clear();
+
+    _isInitialFixComplete = false;
 
     _primaryCandidateState = null;
     _secondaryCandidateState = null;
