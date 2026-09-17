@@ -184,9 +184,9 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   static const int _initialFixWindowSize = 10;
-  static const int _initialFixMinSamples = 7;
+  static const int _initialFixMinSamples = 8;
 
-  static const double _initialFixMinMarginDb = 5.0;
+  static const double _initialFixMinMarginDb = 6.0;
 
   static const Duration _initialFixMaxWait = Duration(seconds: 6);
 
@@ -197,16 +197,18 @@ class NavigationController extends ChangeNotifier {
 
   /// Fewer samples are needed for the strong-signal fast path above,
   /// since it doesn't depend on comparing against a runner-up.
-  static const int _initialFixStrongMinSamples = 3;
+  static const int _initialFixStrongMinSamples = 5;
 
   /// A smaller margin is trustworthy once a candidate has held the lead
   /// for [_initialFixLeaderStreakForAccept] consecutive evaluations.
   /// Since all beacons have equal TX power, small margins are likely RF noise.
-  /// Require at least 3.5 dB sustained difference + 12 evaluations (~1.2 sec)
+  /// Require at least 4.0 dB sustained difference + 15 evaluations (~1.5 sec)
   /// to be confident the beacon difference is real, not multipath.
-  static const double _initialFixSustainedMarginDb = 3.5;
+  /// Phase 11: Increased from 3.5 dB + 12 evals to prevent false positives during
+  /// zone transitions (e.g., Breakout multipath spikes during Gemma→Interim path).
+  static const double _initialFixSustainedMarginDb = 4.0;
 
-  static const int _initialFixLeaderStreakForAccept = 12;
+  static const int _initialFixLeaderStreakForAccept = 15;
 
   // ---------------------------------------------------------------------------
   // SERVICES
@@ -2061,7 +2063,7 @@ class NavigationController extends ChangeNotifier {
     /// Only apply stickiness during the very first fix phase. Once a beacon
     /// is accepted and we start navigating, regular beacon-switch logic takes
     /// over and can transition if the user actually moves.
-    const currentBeaconStickinessDb = 3.0;
+    const currentBeaconStickinessDb = 3.5;
 
     final lockedId = _isInitialFixComplete ? null : currentBeacon?.id;
 
@@ -2189,6 +2191,25 @@ class NavigationController extends ChangeNotifier {
 
     if (margin >= _initialFixSustainedMarginDb &&
         bestStreak >= _initialFixLeaderStreakForAccept) {
+      // Phase 12: When streak is high (≥ 15 evaluations) AND user has walked
+      // some distance (metersSinceBeacon > 0), verify that the candidate is
+      // physically reachable. This prevents acceptance of distant beacons
+      // (e.g., Breakout) that briefly spike via multipath RF during zone
+      // transitions when user is actually moving toward a closer beacon.
+      // Skip check during initial first fix (metersSinceBeacon=0) when PDR
+      // is not yet active.
+      final bestBeacon = storeMap.beaconById(bestId);
+      if (_metersSinceBeacon > 0 &&
+          bestBeacon != null &&
+          !_isPhysicallyReachable(bestBeacon, rssiByBleId)) {
+        _log(
+          'NAV## initial fix — $bestName streak=$bestStreak '
+              'but physically unreachable (metersSinceBeacon='
+              '${_metersSinceBeacon.toStringAsFixed(1)}m) → waiting',
+        );
+        return null;
+      }
+
       _log(
         'NAV## initial fix ACCEPTED — '
             '$bestName sustained lead for $bestStreak evaluations '
@@ -2294,16 +2315,31 @@ class NavigationController extends ChangeNotifier {
 
     if (sustainedLeaderId != bestId &&
         sustainedLeaderStreak >= _initialFixLeaderStreakForAccept ~/ 2) {
-      _log(
-        'NAV## initial fix timeout — '
-            '$bestName only just took the lead, '
-            'accepting sustained leader '
-            '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
-            'instead (streak=$sustainedLeaderStreak)',
-      );
+      // Phase 13: Add physical reachability gate to timeout sustained-leader path,
+      // but only if user has walked (metersSinceBeacon > 0). Skip during initial
+      // first fix when PDR is not yet active.
+      final sustainedLeaderBeacon = storeMap.beaconById(sustainedLeaderId);
+      if (_metersSinceBeacon > 0 &&
+          sustainedLeaderBeacon != null &&
+          !_isPhysicallyReachable(sustainedLeaderBeacon, rssiByBleId)) {
+        _log(
+          'NAV## initial fix timeout — sustained leader '
+              '${sustainedLeaderBeacon.name} (streak=$sustainedLeaderStreak) '
+              'but physically unreachable → committing to best-so-far instead',
+        );
+        // Fall through to best-so-far check below
+      } else {
+        _log(
+          'NAV## initial fix timeout — '
+              '$bestName only just took the lead, '
+              'accepting sustained leader '
+              '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
+              'instead (streak=$sustainedLeaderStreak)',
+        );
 
-      _isInitialFixComplete = true;
-      return storeMap.beaconById(sustainedLeaderId);
+        _isInitialFixComplete = true;
+        return storeMap.beaconById(sustainedLeaderId);
+      }
     }
 
     if (candidateStrengthening || competitorWeakening) {
@@ -2320,6 +2356,22 @@ class NavigationController extends ChangeNotifier {
 
     // No trend evidence either way — commit to whoever is #1 right now
     // rather than sampling indefinitely.
+    // Phase 13: Add physical reachability gate to timeout best-so-far fallback,
+    // but only if user has walked (metersSinceBeacon > 0). Skip during initial
+    // first fix when PDR is not yet active.
+    final bestBeaconForFallback = storeMap.beaconById(bestId);
+    if (_metersSinceBeacon > 0 &&
+        bestBeaconForFallback != null &&
+        !_isPhysicallyReachable(bestBeaconForFallback, rssiByBleId)) {
+      _log(
+        'NAV## initial fix timeout — '
+            '$bestName would be accepted but is physically unreachable '
+            '(metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(1)}m) '
+            '→ wait for closer beacon',
+      );
+      return null;
+    }
+
     _log(
       'NAV## initial fix timeout — '
           'no trend advantage, committing to best-so-far '
