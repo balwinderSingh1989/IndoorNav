@@ -138,6 +138,11 @@ class NavigationController extends ChangeNotifier {
   /// physically have been reached.
   static const double _reachabilityToleranceMeters = 3.5;
 
+  /// Free-roam (no destination) candidate must win this many consecutive
+  /// evaluations before replacing the current beacon — a single noisy
+  /// ranking flip previously committed instantly with no hysteresis.
+  static const int _freeRoamSwitchConfirmReadings = 3;
+
 
 
   /// When false:
@@ -558,6 +563,28 @@ class NavigationController extends ChangeNotifier {
       final changed = currentBeacon?.id != candidate.id;
 
       if (!changed) {
+        // Already-selected beacon is still winning — nothing pending to clear.
+        _clearPendingBeaconCandidate();
+        return;
+      }
+
+      // Require the new candidate to win several consecutive evaluations
+      // before replacing the current beacon, instead of committing on the
+      // first flip — this is what was missing vs. navigation-mode switches.
+      if (candidate.id == _pendingBeaconId) {
+        _pendingBeaconCount++;
+      } else {
+        _pendingBeaconId = candidate.id;
+        _pendingBeaconCount = 1;
+        _pendingBeaconSince = now;
+      }
+
+      if (_pendingBeaconCount < _freeRoamSwitchConfirmReadings) {
+        _log(
+          'NAV## free-roam candidate ${candidate.name} pending '
+              '($_pendingBeaconCount/$_freeRoamSwitchConfirmReadings)',
+        );
+
         return;
       }
 
@@ -3767,7 +3794,9 @@ class NavigationController extends ChangeNotifier {
 
     _initialFixStartedAt = null;
 
-    _initialFixLeaderStreaks.clear();
+    // Halve rather than wipe — a beacon already trending toward leadership
+    // shouldn't have to re-earn all its evidence from zero after a switch.
+    _initialFixLeaderStreaks.updateAll((_, v) => v ~/ 2);
 
     _isInitialFixComplete = false;
 
