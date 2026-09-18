@@ -51,7 +51,9 @@ class _StatusCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final here = controller.currentBeacon?.name ?? 'Locating…';
+    final hasFix = controller.currentBeacon != null;
+    final confidence = controller.beaconConfidence;
+    final here = controller.currentBeacon?.name ?? 'Finding your location…';
     final there = controller.destinationBeacon?.name;
     final status = switch (controller.status) {
       NavigationStatus.checkingLocation => 'Checking your location…',
@@ -77,14 +79,31 @@ class _StatusCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.my_location, size: 16, color: colorScheme.primary),
+              _LocationConfidenceIndicator(hasFix: hasFix, confidence: confidence),
               const SizedBox(width: 8),
               Expanded(
                 child: Text.rich(
                   TextSpan(
                     children: [
-                      TextSpan(text: 'You are near  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
-                      TextSpan(text: here, style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+                      if (hasFix)
+                        TextSpan(text: 'You are near  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
+                      TextSpan(
+                        text: here,
+                        style: hasFix
+                            ? textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)
+                            : textTheme.bodyMedium?.copyWith(
+                                fontStyle: FontStyle.italic,
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                      ),
+                      if (hasFix && confidence < 0.999)
+                        TextSpan(
+                          text: '  · confirming',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
                     ],
                   ),
                   maxLines: 1,
@@ -162,6 +181,76 @@ class _StatusCard extends StatelessWidget {
   String _formatDistance(double meters) {
     if (meters < 1000) return '${meters.round()} m';
     return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+}
+
+/// Reflects [NavigationController.beaconConfidence] instead of a plain
+/// static pin — a filling ring while the pick is still settling, a pulsing
+/// dot before any fix at all, so a later flip doesn't read as the app
+/// having been "wrong" about a name it never confidently committed to.
+class _LocationConfidenceIndicator extends StatefulWidget {
+  const _LocationConfidenceIndicator({required this.hasFix, required this.confidence});
+
+  final bool hasFix;
+  final double confidence;
+
+  @override
+  State<_LocationConfidenceIndicator> createState() => _LocationConfidenceIndicatorState();
+}
+
+class _LocationConfidenceIndicatorState extends State<_LocationConfidenceIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    if (!widget.hasFix) {
+      return FadeTransition(
+        opacity: Tween(begin: 0.35, end: 1.0).animate(_pulse),
+        child: Icon(Icons.location_searching, size: 16, color: colorScheme.primary),
+      );
+    }
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: widget.confidence),
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeOut,
+      builder: (context, value, _) {
+        if (value >= 0.999) {
+          return Icon(Icons.my_location, size: 16, color: colorScheme.primary);
+        }
+        return SizedBox(
+          width: 16,
+          height: 16,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CircularProgressIndicator(
+                value: value,
+                strokeWidth: 2,
+                color: colorScheme.primary,
+                backgroundColor: colorScheme.primary.withValues(alpha: 0.15),
+              ),
+              Icon(Icons.my_location, size: 8, color: colorScheme.primary),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
 

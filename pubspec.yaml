@@ -21,6 +21,7 @@ dependencies:
   wifi_scan: ^0.4.1+2
   shared_preferences: ^2.5.3
   file_picker: ^10.3.3
+  vector_math: ^2.1.4
 
 dependency_overrides:
   reactive_ble_mobile:
