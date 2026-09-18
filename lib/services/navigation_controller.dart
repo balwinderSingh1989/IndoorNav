@@ -136,7 +136,7 @@ class NavigationController extends ChangeNotifier {
 
   /// Additional distance allowance when deciding whether a beacon could
   /// physically have been reached.
-  static const double _reachabilityToleranceMeters = 3.5;
+  static const double _reachabilityToleranceMeters = 2;
 
   /// Free-roam (no destination) candidate must win this many consecutive
   /// evaluations before replacing the current beacon — a single noisy
@@ -214,6 +214,12 @@ class NavigationController extends ChangeNotifier {
   static const double _initialFixSustainedMarginDb = 4.0;
 
   static const int _initialFixLeaderStreakForAccept = 15;
+
+  /// Floor for the timeout trend-only fallback (no streak/strong-margin
+  /// evidence) — without this it could flip on a margin as low as the RF
+  /// noise floor (observed ~0.5dB) purely because a trend flag happened to
+  /// be set.
+  static const double _initialFixTimeoutTrendMinMarginDb = 2.0;
 
   // ---------------------------------------------------------------------------
   // SERVICES
@@ -355,6 +361,32 @@ class NavigationController extends ChangeNotifier {
 
   int get strideCalibrationSampleCount =>
       motionService.strideCalibrationSampleCount;
+
+  /// 0.0–1.0: how settled [currentBeacon] is, for UI to distinguish a fresh/
+  /// contested pick from a confirmed one instead of presenting both the same.
+  ///
+  /// Free-roam: ratio of the current beacon's leader streak to the streak
+  /// required for a confident accept — dips whenever a competitor is
+  /// mounting a real challenge, not just on every RSSI wobble.
+  /// Navigation mode: inverted progress of a pending challenger, so it drops
+  /// toward 0 as a route-following switch gets closer to being confirmed.
+  double get beaconConfidence {
+    final beacon = currentBeacon;
+    if (beacon == null) {
+      return 0.0;
+    }
+
+    if (destinationBeacon != null) {
+      if (_pendingBeaconId == null) {
+        return 1.0;
+      }
+      return 1.0 -
+          (_pendingBeaconCount / _requiredConsecutiveReadings).clamp(0.0, 1.0);
+    }
+
+    final streak = _initialFixLeaderStreaks[beacon.id] ?? 0;
+    return (streak / _initialFixLeaderStreakForAccept).clamp(0.0, 1.0);
+  }
 
   /// Route-derived heading.
   ///
@@ -2164,13 +2196,18 @@ class NavigationController extends ChangeNotifier {
     // This blocks pure noise oscillations while allowing real beacon transitions.
     const minMarginForStreak = 0.5;
 
+    // Decay by 2 (vs +1 to build) so a stale lock gives up faster once the
+    // real signal has already flipped, without lowering the bar to acquire one.
+    const streakDecayOnLoss = 2;
+
     for (final id in averages.keys) {
       final current = _initialFixLeaderStreaks[id] ?? 0;
 
       if (id == bestId && margin >= minMarginForStreak) {
         _initialFixLeaderStreaks[id] = current + 1;
       } else if (id != bestId && current > 0) {
-        _initialFixLeaderStreaks[id] = current - 1;
+        _initialFixLeaderStreaks[id] =
+            (current - streakDecayOnLoss).clamp(0, current);
       }
     }
 
@@ -2237,11 +2274,13 @@ class NavigationController extends ChangeNotifier {
         return null;
       }
 
+
       _log(
         'NAV## initial fix ACCEPTED — '
             '$bestName sustained lead for $bestStreak evaluations '
             '(margin=${margin.toStringAsFixed(1)}dB '
-            'vs $secondName)',
+            'vs $secondName) '
+            'reachabilityChecked=${_metersSinceBeacon > 0}',
       );
 
       _isInitialFixComplete = true;
@@ -2361,7 +2400,8 @@ class NavigationController extends ChangeNotifier {
               '$bestName only just took the lead, '
               'accepting sustained leader '
               '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
-              'instead (streak=$sustainedLeaderStreak)',
+              'instead (streak=$sustainedLeaderStreak) '
+              'reachabilityChecked=${_metersSinceBeacon > 0}',
         );
 
         _isInitialFixComplete = true;
@@ -2369,7 +2409,10 @@ class NavigationController extends ChangeNotifier {
       }
     }
 
-    if (candidateStrengthening || competitorWeakening) {
+    // Trend alone still needs a margin floor above the noise level (observed
+    // as low as 0.5dB), otherwise this fires on RF fluctuation, not movement.
+    if ((candidateStrengthening || competitorWeakening) &&
+        margin >= _initialFixTimeoutTrendMinMarginDb) {
       _log(
         'NAV## initial fix timeout — '
             'accepting $bestName based on trend '
@@ -2399,13 +2442,32 @@ class NavigationController extends ChangeNotifier {
       return null;
     }
 
-    _log(
-      'NAV## initial fix timeout — '
-          'no trend advantage, committing to best-so-far '
-          '$bestName '
-          '(margin=${margin.toStringAsFixed(1)}dB '
-          'trend=$bestTrend/$secondTrend)',
-    );
+
+    if(margin > 1 && ( bestTrend  == _InitialFixTrend.strengthening || bestTrend  == _InitialFixTrend.stable)) {
+      _log(
+        'NAV## initial fix timeout — '
+            'no trend advantage, committing to best-so-far '
+            '$bestName '
+            '(margin=${margin.toStringAsFixed(1)}dB '
+            'trend=$bestTrend/$secondTrend) '
+            'reachabilityChecked=${_metersSinceBeacon > 0}',
+      );
+    }
+    else
+      {
+
+        _log(
+          'NAV## initial fix timeout — '
+              'no trend advantage, ABORTED'
+              '$bestName '
+              '(margin=${margin.toStringAsFixed(1)}dB '
+              'trend=$bestTrend/$secondTrend) '
+              'reachabilityChecked=${_metersSinceBeacon > 0}',
+        );
+
+        return null;
+
+      }
 
     _isInitialFixComplete = true;
     return storeMap.beaconById(bestId);
@@ -3134,6 +3196,21 @@ class NavigationController extends ChangeNotifier {
       );
 
       return true;
+    }else {
+
+
+        _log(
+          'NAV### reachability check FAILED: '
+              '${candidate.name} is '
+              '${walkingDistanceMeters.toStringAsFixed(1)}m '
+              'away via graph from ${anchor.name}, '
+              '${_metersSinceBeacon.toStringAsFixed(1)}m '
+              'walked so far '
+              '(tolerance '
+              '${_reachabilityToleranceMeters}m) '
+              '→ REACHABLE',
+        );
+
     }
 
     // -----------------------------------------------------------------------
