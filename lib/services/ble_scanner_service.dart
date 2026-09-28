@@ -15,14 +15,21 @@ class _TimedRssi {
 /// Estimates the true RSSI value given noisy measurements.
 class _BeaconKalmanState {
   double estimate = -70.0; // Initial estimate (typical indoor RSSI)
-  double estimateError = 2.0; // Initial estimate error (in dB)
-  double measurementError = 1.5; // Measurement noise (in dB) — tunable
+  double estimateError; // Initial estimate error (in dB)
+  double measurementError; // Measurement noise (in dB) — tunable
+  double processNoise; // Process noise — how much signal can drift between readings
+
+  _BeaconKalmanState({
+    this.estimateError = 2.0,
+    this.measurementError = 1.5,
+    this.processNoise = 0.01,
+  });
 
   /// Update the Kalman filter with a new RSSI measurement.
   /// Returns the updated estimate.
   double update(double measurement) {
-    // Prediction phase: estimate stays same, error increases
-    final predictedError = estimateError + 0.01; // Very small process noise
+    // Prediction phase: estimate stays same, error increases due to process noise
+    final predictedError = estimateError + processNoise;
 
     // Update phase: Kalman gain tells us how much to trust the measurement
     final kalmanGain = predictedError / (predictedError + measurementError);
@@ -93,8 +100,12 @@ class BleScannerService {
     // longer to actually show up in the average. Still plenty of samples
     // to average given typical advertising intervals well under a second.
     this.rollingWindow = const Duration(milliseconds: 1800),
-    this.filterMode = RssiFilterMode.median,
+    this.filterMode = RssiFilterMode.kalman,
     this.enableComparisonLogging = false,
+    // Kalman tuning parameters
+    this.kalmanMeasurementError = 1.5,
+    this.kalmanProcessNoise = 0.01,
+    this.kalmanInitialError = 2.0,
   }) : _ble = ble;
 
   FlutterReactiveBle? _ble;
@@ -102,8 +113,17 @@ class BleScannerService {
   final RssiFilterMode filterMode;
   final bool enableComparisonLogging;
 
+  /// Kalman filter tuning parameters (can be adjusted per environment)
+  final double kalmanMeasurementError;
+  final double kalmanProcessNoise;
+  final double kalmanInitialError;
+
   /// Per-beacon Kalman filter states for RSSI estimation
   final Map<String, _BeaconKalmanState> _kalmanStates = {};
+
+  /// Beacon names by BLE key (e.g. "uuid:major:minor" -> "Safari")
+  /// Populated from StoreMap.beacons at initialization
+  final Map<String, String> _beaconNamesByKey = {};
 
   /// How long a beacon can go unseen before its last-known reading is
   /// pruned and it disappears from [rssiStream]/[scanInfoStream]. Without
@@ -121,6 +141,19 @@ class BleScannerService {
   /// on some Android BLE stacks/OEMs.
   static const Duration _watchdogNoDeviceThreshold = Duration(seconds: 10);
   static const Duration _watchdogCheckInterval = Duration(seconds: 5);
+
+  /// Initialize beacon name lookup from store data.
+  /// Call this before scanning to ensure proper names in logs.
+  void setBeaconNameLookup(Map<String, String> namesByKey) {
+    _beaconNamesByKey.addAll(namesByKey);
+  }
+
+  /// Reset all Kalman filter states (useful after tuning parameter changes).
+  /// This clears accumulated filter state for fresh estimation.
+  void resetKalmanStates() {
+    _kalmanStates.clear();
+    print('[BLE] Kalman states reset for all beacons');
+  }
 
   static const _debugTargetMacToKey = {
     'c300001318cb': 'e2c56db5-dffb-48d2-b060-d0f5a71096e0:0:0',
@@ -324,10 +357,14 @@ class BleScannerService {
     final history = _readings.putIfAbsent(key, () => []);
     history.add(_TimedRssi(now, device.rssi));
     history.removeWhere((r) => now.difference(r.time) > rollingWindow);
+    
+    // Use beacon name from store data if available, otherwise use device name
+    final beaconName = _beaconNamesByKey[key] ?? device.name;
+    
     _scanInfoByKey[key] = BeaconScanInfo(
       key: key,
       scannerId: device.id,
-      name: device.name,
+      name: beaconName,
       rssi: device.rssi.toDouble(),
       lastSeen: now,
     );
@@ -427,7 +464,11 @@ class BleScannerService {
       // Get or create Kalman state for this beacon
       final state = _kalmanStates.putIfAbsent(
         key,
-        () => _BeaconKalmanState(),
+        () => _BeaconKalmanState(
+          estimateError: kalmanInitialError,
+          measurementError: kalmanMeasurementError,
+          processNoise: kalmanProcessNoise,
+        ),
       );
 
       // Feed all recent measurements through the filter (in order)
@@ -448,7 +489,19 @@ class BleScannerService {
   ) {
     final keys = {...median.keys, ...kalman.keys};
     for (final key in keys) {
-      final beaconName = _scanInfoByKey[key]?.name ?? 'Unknown';
+      final scanInfo = _scanInfoByKey[key];
+      final storedName = _beaconNamesByKey[key];
+      
+      // Priority: scanInfo name > stored name lookup > key
+      String beaconName = 'Unknown';
+      if (scanInfo?.name?.isNotEmpty ?? false) {
+        beaconName = scanInfo!.name;
+      } else if (storedName?.isNotEmpty ?? false) {
+        beaconName = storedName!;
+      } else {
+        beaconName = 'Unknown (key: $key)';
+      }
+      
       final medianVal = median[key]?.toStringAsFixed(1) ?? 'N/A';
       final kalmanVal = kalman[key]?.toStringAsFixed(1) ?? 'N/A';
       final diff = (median[key] != null && kalman[key] != null)
@@ -456,10 +509,10 @@ class BleScannerService {
           : 'N/A';
 
       print(
-        '[BLE_FILTER_CMP] $beaconName | '
-        'Median=$medianVal | '
-        'Kalman=$kalmanVal | '
-        'Δ=$diff dB',
+        '[BLE_FILTER_CMP] Beacon: $beaconName | '
+        'Median: $medianVal dB | '
+        'Kalman: $kalmanVal dB | '
+        'Δ: $diff dB',
       );
     }
   }
