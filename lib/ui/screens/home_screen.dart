@@ -16,6 +16,7 @@ import '../widgets/product_search_delegate.dart';
 import '../widgets/section_header.dart';
 import 'beacon_settings_screen.dart';
 import 'logs_screen.dart';
+import 'ml_data_collection_screen.dart';
 import 'navigation_screen.dart';
 import 'product_listing_screen.dart';
 
@@ -208,6 +209,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  void _openMlDataCollection() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MlDataCollectionScreen(
+          storeMap: widget.controller.storeMap,
+          bleScanner: widget.controller.bleScanner,
+        ),
+      ),
+    );
+  }
+
   void _openCategory(ProductCategory category) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -239,6 +251,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             icon: const Icon(Icons.insights_outlined),
             tooltip: 'Logs & analytics',
             onPressed: _openLogs,
+          ),
+          IconButton(
+            icon: const Icon(Icons.smart_toy_outlined),
+            tooltip: 'Collect ML training data',
+            onPressed: _openMlDataCollection,
           ),
         ],
       ),

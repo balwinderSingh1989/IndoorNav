@@ -55,6 +55,9 @@ class _IndoorNavAppState extends State<IndoorNavApp> {
             ),
           );
 
+          // Initialize ML zone classifier asynchronously (fire-and-forget)
+          _controller!.initializeZoneClassifier();
+
           return HomeScreen(controller: _controller!);
         },
       ),

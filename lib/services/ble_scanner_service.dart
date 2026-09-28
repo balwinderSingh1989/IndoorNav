@@ -11,6 +11,36 @@ class _TimedRssi {
   _TimedRssi(this.time, this.rssi);
 }
 
+/// Kalman filter state for a single beacon's RSSI tracking.
+/// Estimates the true RSSI value given noisy measurements.
+class _BeaconKalmanState {
+  double estimate = -70.0; // Initial estimate (typical indoor RSSI)
+  double estimateError = 2.0; // Initial estimate error (in dB)
+  double measurementError = 1.5; // Measurement noise (in dB) — tunable
+
+  /// Update the Kalman filter with a new RSSI measurement.
+  /// Returns the updated estimate.
+  double update(double measurement) {
+    // Prediction phase: estimate stays same, error increases
+    final predictedError = estimateError + 0.01; // Very small process noise
+
+    // Update phase: Kalman gain tells us how much to trust the measurement
+    final kalmanGain = predictedError / (predictedError + measurementError);
+
+    // New estimate = old estimate + gain * (measurement - estimate)
+    estimate = estimate + kalmanGain * (measurement - estimate);
+    estimateError = (1.0 - kalmanGain) * predictedError;
+
+    return estimate;
+  }
+}
+
+enum RssiFilterMode {
+  median,
+  kalman,
+  both, // Run both in parallel for testing/comparison
+}
+
 class BeaconScanInfo {
   const BeaconScanInfo({
     required this.key,
@@ -62,11 +92,18 @@ class BleScannerService {
     // means a real movement (or a genuine zone change) takes that much
     // longer to actually show up in the average. Still plenty of samples
     // to average given typical advertising intervals well under a second.
-    this.rollingWindow = const Duration(milliseconds: 2000),
+    this.rollingWindow = const Duration(milliseconds: 1800),
+    this.filterMode = RssiFilterMode.median,
+    this.enableComparisonLogging = false,
   }) : _ble = ble;
 
   FlutterReactiveBle? _ble;
   final Duration rollingWindow;
+  final RssiFilterMode filterMode;
+  final bool enableComparisonLogging;
+
+  /// Per-beacon Kalman filter states for RSSI estimation
+  final Map<String, _BeaconKalmanState> _kalmanStates = {};
 
   /// How long a beacon can go unseen before its last-known reading is
   /// pruned and it disappears from [rssiStream]/[scanInfoStream]. Without
@@ -304,7 +341,51 @@ class BleScannerService {
     _scanInfoController.add(_latestScanInfo);
   }
 
+
+// //average - better for celing mounted BEacons
+//   Map<String, double> _averagedRssi() {
+//     final now = DateTime.now();
+//     final result = <String, double>{};
+//
+//     for (final entry in _readings.entries) {
+//       // 1. Filter out scans outside the rolling time window
+//       final recent = entry.value
+//           .where((r) => now.difference(r.time) <= rollingWindow)
+//           .toList();
+//
+//       if (recent.isEmpty) continue;
+//
+//       // 2. Sum the raw RSSI values up
+//       final sum = recent.map((r) => r.rssi).reduce((a, b) => a + b);
+//
+//       // 3. Compute a clean, smooth mathematical average
+//       final average = sum / recent.length;
+//       result[entry.key] = double.parse(average.toStringAsFixed(1));
+//     }
+//     return result;
+//   }
+
+  /// Main RSSI averaging method — delegates to configured filter mode.
+  /// If [filterMode] is [RssiFilterMode.both], runs both and logs comparison.
   Map<String, double> _averagedRssi() {
+    if (filterMode == RssiFilterMode.both) {
+      final median = _averagedRssiMedian();
+      final kalman = _averagedRssiKalman();
+      if (enableComparisonLogging) {
+        _logComparisonResults(median, kalman);
+      }
+      // Return median as the default for now (can be switched)
+      return median;
+    } else if (filterMode == RssiFilterMode.kalman) {
+      return _averagedRssiKalman();
+    } else {
+      return _averagedRssiMedian();
+    }
+  }
+
+  /// Median-based RSSI averaging — better for wall-mounted beacons.
+  /// Robust against outliers; preserves peaks in RSSI trends.
+  Map<String, double> _averagedRssiMedian() {
     final now = DateTime.now();
     final result = <String, double>{};
     for (final entry in _readings.entries) {
@@ -319,6 +400,76 @@ class BleScannerService {
           : (values[middle - 1] + values[middle]) / 2.0;
     }
     return result;
+  }
+
+  /// Kalman-filtered RSSI averaging — adaptive filter that learns
+  /// measurement noise and produces smoothed estimates.
+  /// Each beacon maintains its own filter state across calls.
+  Map<String, double> _averagedRssiKalman() {
+    final now = DateTime.now();
+    final result = <String, double>{};
+
+    for (final entry in _readings.entries) {
+      final key = entry.key;
+      final recent = entry.value
+          .where((r) => now.difference(r.time) <= rollingWindow)
+          .toList();
+
+      if (recent.isEmpty) {
+        // No recent data — use last estimate if available
+        final state = _kalmanStates[key];
+        if (state != null) {
+          result[key] = state.estimate;
+        }
+        continue;
+      }
+
+      // Get or create Kalman state for this beacon
+      final state = _kalmanStates.putIfAbsent(
+        key,
+        () => _BeaconKalmanState(),
+      );
+
+      // Feed all recent measurements through the filter (in order)
+      for (final timedRssi in recent) {
+        state.update(timedRssi.rssi.toDouble());
+      }
+
+      result[key] = state.estimate;
+    }
+
+    return result;
+  }
+
+  /// Log side-by-side comparison of median vs kalman for each beacon.
+  void _logComparisonResults(
+    Map<String, double> median,
+    Map<String, double> kalman,
+  ) {
+    final keys = {...median.keys, ...kalman.keys};
+    for (final key in keys) {
+      final beaconName = _scanInfoByKey[key]?.name ?? 'Unknown';
+      final medianVal = median[key]?.toStringAsFixed(1) ?? 'N/A';
+      final kalmanVal = kalman[key]?.toStringAsFixed(1) ?? 'N/A';
+      final diff = (median[key] != null && kalman[key] != null)
+          ? (median[key]! - kalman[key]!).toStringAsFixed(2)
+          : 'N/A';
+
+      print(
+        '[BLE_FILTER_CMP] $beaconName | '
+        'Median=$medianVal | '
+        'Kalman=$kalmanVal | '
+        'Δ=$diff dB',
+      );
+    }
+  }
+
+  /// Switch filter mode at runtime for testing.
+  void setFilterMode(RssiFilterMode mode, {bool enableLogging = false}) {
+    // Note: This doesn't actually change the filterMode field (it's final),
+    // but we can use a mutable field instead if needed for runtime switching.
+    print('[BLE] Filter mode request: $mode (logging=$enableLogging) — '
+        'requires app restart to take effect due to final configuration');
   }
 
   void stopScan() {
