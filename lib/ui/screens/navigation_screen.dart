@@ -43,6 +43,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   void _showError(String message) {
     if (!mounted) return;
+    if (message.startsWith('Motion permission denied')) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
     );

@@ -1,4 +1,6 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="NamespacedRAttributeReference">
     <!-- Required to call the Ace Hardware catalog API (CatalogApiService).
          Flutter's debug/profile manifests already merge this in for those
          build types, but it's not implicit for release builds. -->

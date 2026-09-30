@@ -13,8 +13,6 @@ import 'activity_logger.dart';
 import 'pathfinding_service.dart';
 import 'zone_snap_service.dart';
 import 'zone_snap_service.dart';
-import 'ml_beacon_confidence_service.dart';
-import 'beacon_zone_classifier.dart';
 
 enum NavigationStatus {
   idle,
@@ -99,17 +97,7 @@ class NavigationController extends ChangeNotifier {
       (e) => _log('NAV## motion error: $e'),
     );
 
-    // Create ML-specific EMA filter (α=0.45, matches training data collection).
-    // This is separate from rule-based EMA (_rssiEma, α=0.30) to ensure
-    // model inference sees the same RSSI distribution as training.
-    // CRITICAL: Use BLE keys (fullBleKey or normalizedBleId), NOT app IDs!
-    // The RSSI stream is keyed by BLE IDs like "uuid:major:minor", not "Breakout"
-    final bleKeys = storeMap.beacons
-        .map((b) => b.fullBleKey ?? b.normalizedBleId)
-        .toList();
-    _mlRssiFilter = RssiEmaFilter(
-      beaconIds: bleKeys,
-    );
+
 
     // Reserved for future movement-direction support.
     //
@@ -387,14 +375,8 @@ class NavigationController extends ChangeNotifier {
 
   final Map<String, double> _rssiEma = {};
 
-  // ---------------------------------------------------------------------------
-  // ML BEACON CONFIDENCE
-  // ---------------------------------------------------------------------------
-  // IMPORTANT: ML uses a SEPARATE EMA filter (α=0.45) to match training data.
-  // Rule-based logic continues using α=0.30 (unchanged).
-  RssiEmaFilter? _mlRssiFilter;
-  BeaconZoneClassifier? _zoneClassifier;
-  double _mlZoneConfidence = 0.0;
+
+
 
   // ---------------------------------------------------------------------------
   // INITIAL FIX STATE
@@ -622,13 +604,6 @@ class NavigationController extends ChangeNotifier {
     // Smooth the raw RSSI before using it for decisions.
     _updateRssiEma(rssiByBleId);
 
-    // Update ML-specific EMA filter (α=0.45) in parallel with rule-based EMA.
-    // Both filters process the same raw RSSI, but with different alphas:
-    // - Rule-based (α=0.30): Used for beacon switching hysteresis
-    // - ML (α=0.45): Used for model inference (matches training data distribution)
-    if(checkMLBasedConfidence) {
-      _updateMlRssiEma(rssiByBleId);
-    }
 
     _updateCurrentBeaconState(rssiByBleId);
 
@@ -636,21 +611,6 @@ class NavigationController extends ChangeNotifier {
 
     // Update trend of the immediate next route beacon.
     _updateNextBeaconTrend(rssiByBleId);
-
-
-    if(checkMLBasedConfidence) {
-    // -----------------------------------------------------------------------
-    // ML ZONE CONFIDENCE (Testing)
-    // -----------------------------------------------------------------------
-    final mlZoneConfidence = await getMlZoneConfidence();
-    final predictedZoneIdx = await getMlPredictedZone();
-    final predictedZoneName = (predictedZoneIdx >= 0 && predictedZoneIdx < storeMap.beacons.length)
-        ? storeMap.beacons[predictedZoneIdx].name
-        : 'Unknown';
-    final mlLogMessage = '[NAV/ML] Predicted Zone: $predictedZoneName (idx: $predictedZoneIdx), Confidence: ${mlZoneConfidence.toStringAsFixed(3)} (classifier: ${_zoneClassifier != null ? "loaded" : "not loaded"})';
-    _log(mlLogMessage);
-    debugPrint('NAV] $mlLogMessage');
-    }
 
     // -----------------------------------------------------------------------
     // CANDIDATE SELECTION
@@ -1777,14 +1737,7 @@ class NavigationController extends ChangeNotifier {
     }
   }
 
-  /// Update ML-specific EMA filter (α=0.45) in parallel with rule-based EMA (α=0.30).
-  /// This ensures model inference receives the same RSSI distribution as training.
-  void _updateMlRssiEma(Map<String, double> rssiByBleId) {
-    if (_mlRssiFilter == null) return;
-    for (final entry in rssiByBleId.entries) {
-      _mlRssiFilter!.getSmoothedRssi(entry.key, entry.value);
-    }
-  }
+
 
   double? _smoothedRssi(
     String beaconId,
@@ -4395,68 +4348,6 @@ class NavigationController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _forceAdvanceToNextBeaconByPdr(
-    Beacon nextBeacon, {
-    required String reason,
-  }) {
-    final previousBeacon = currentBeacon;
-
-    if (previousBeacon == null || previousBeacon.id == nextBeacon.id) {
-      return;
-    }
-
-    // Final route-order guard. PDR may advance only one edge at a time.
-    if (!_isNavigationHopValid(previousBeacon, nextBeacon)) {
-      _log(
-        'NAV## PDR ADVANCE BLOCKED '
-        '${previousBeacon.name} → ${nextBeacon.name}',
-      );
-      return;
-    }
-
-    final now = DateTime.now();
-    final inCooldown = _lastBeaconSwitchAt != null &&
-        now.difference(_lastBeaconSwitchAt!) < _beaconSwitchCooldown;
-
-    if (inCooldown) {
-      return;
-    }
-
-    final prevPath = List<Beacon>.from(currentPath);
-
-    _recordCompletedSegmentCalibration(
-      previousBeacon,
-      nextBeacon,
-    );
-
-    _clearPendingBeaconCandidate();
-
-    currentBeacon = nextBeacon;
-    _lastBeaconSwitchAt = now;
-
-    _recomputePath();
-    _log(
-      'NAV### PATH AFTER RECOMPUTE: '
-          '${currentPath.map((b) => b.name).join(' → ')}',
-    );
-    _snapToCurrentBeacon();
-
-    status = nextBeacon.id == destinationBeacon?.id
-        ? NavigationStatus.arrived
-        : NavigationStatus.navigating;
-
-    _zoneEnteredController.add(nextBeacon);
-
-    _log(
-      'NAV## PDR ADVANCE → ${nextBeacon.name} '
-      'from=${previousBeacon.name} '
-      'reason=$reason '
-      'rawMeters=${_metersSinceBeacon.toStringAsFixed(2)} '
-      'previousPathNodes=${prevPath.length}',
-    );
-
-    notifyListeners();
-  }
 
 
   bool _isUserOnCurrentRouteSegment() {
@@ -5018,117 +4909,6 @@ class NavigationController extends ChangeNotifier {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // ML BEACON CONFIDENCE
-  // ---------------------------------------------------------------------------
-
-  /// Initialize ML zone classifier at app startup.
-  /// Call this after storeMap is fully loaded.
-  Future<void> initializeZoneClassifier() async {
-    try {
-      _zoneClassifier = await BeaconZoneClassifier.loadModel(
-        numBeacons: storeMap.beacons.length,
-        numZones: storeMap.beacons.length, // One zone per beacon
-      );
-      debugPrint('[NAV/ML] Zone classifier loaded successfully');
-    } catch (e) {
-      debugPrint('[NAV/ML] Failed to load zone classifier: $e');
-      // Gracefully continue without ML — rule-based confidence still works
-    }
-  }
-
-  /// Get ML-based zone confidence (0.0-1.0) from TFLite model.
-  /// Uses ML-specific EMA filter (α=0.45) for consistency with training data.
-  /// Returns 0.0 if model not loaded or no current beacon.
-  Future<double> getMlZoneConfidence() async {
-    if (_mlRssiFilter == null || _zoneClassifier == null || currentBeacon == null) {
-      return 0.0;
-    }
-
-    try {
-      // Get feature vector from ML EMA (α=0.45) — CRITICAL for distribution match
-      // Feature vector is EMA-smoothed (same as training data collection)
-      final featureVector = _mlRssiFilter!.getFeatureVector(_lastRssiByBeaconId);
-      
-      // Get probabilities to extract confidence for predicted zone
-      final probs = await _zoneClassifier!.predictZoneProbabilities(featureVector);
-      final predictedIdx = await _zoneClassifier!.predictZone(featureVector);
-      
-      // Confidence is the probability of the predicted zone
-      _mlZoneConfidence = (predictedIdx >= 0 && predictedIdx < probs.length) 
-          ? probs[predictedIdx] 
-          : 0.0;
-      
-      return _mlZoneConfidence;
-    } catch (e) {
-      debugPrint('[NAV/ML] Inference error: $e');
-      return 0.0;
-    }
-  }
-
-  /// Get predicted zone index from ML model.
-  /// Returns -1 if model not available or error.
-  Future<int> getMlPredictedZone() async {
-    if (_mlRssiFilter == null || _zoneClassifier == null) return -1;
-
-    try {
-      final featureVector = _mlRssiFilter!.getFeatureVector(_lastRssiByBeaconId);
-      
-      // Log raw RSSI values - show what keys we actually have
-      debugPrint('[NAV/ML] Raw RSSI map keys: ${_lastRssiByBeaconId.keys.toList()}');
-      debugPrint('[NAV/ML] Raw RSSI values: ${_lastRssiByBeaconId.values.map((v) => v.toStringAsFixed(1)).toList()}');
-      
-      // Try to map beacons to their RSSI values
-      final beaconRssiMap = <String, double>{};
-      for (final beacon in storeMap.beacons) {
-        // Try different key formats
-        double? rssi = _lastRssiByBeaconId[beacon.fullBleKey] ?? 
-                       _lastRssiByBeaconId[beacon.normalizedBleId] ??
-                       _lastRssiByBeaconId[beacon.id] ??
-                       -100.0;
-        beaconRssiMap[beacon.name] = rssi;
-      }
-      final rawRssiByBeacon = beaconRssiMap.entries
-          .map((e) => '${e.key}=${e.value.toStringAsFixed(1)}')
-          .join(', ');
-      debugPrint('[NAV/ML] Raw RSSI (by beacon): $rawRssiByBeacon');
-      
-      // Log full feature vector (EMA-smoothed)
-      final featureStr = featureVector.map((v) => v.toStringAsFixed(2)).join(', ');
-      debugPrint('[NAV/ML] EMA Feature Vector: [$featureStr]');
-      
-      // Get all zone probabilities
-      final probs = await _zoneClassifier!.predictZoneProbabilities(featureVector);
-      final probsStr = storeMap.beacons
-          .asMap()
-          .entries
-          .map((e) => '${e.value.name}: ${(probs[e.key] * 100).toStringAsFixed(1)}%')
-          .join(' | ');
-      debugPrint('[NAV/ML] Zone Probabilities: $probsStr');
-      
-      final predictedZoneIdx = await _zoneClassifier!.predictZone(featureVector);
-      final predictedZoneName = (predictedZoneIdx >= 0 && predictedZoneIdx < storeMap.beacons.length)
-          ? storeMap.beacons[predictedZoneIdx].name
-          : 'Unknown';
-      debugPrint('[NAV/ML] PREDICTED: $predictedZoneName (idx=$predictedZoneIdx)');
-      
-      return predictedZoneIdx;
-    } catch (e) {
-      debugPrint('[NAV/ML] Prediction error: $e');
-      return -1;
-    }
-  }
-
-  /// Fused confidence: combines rule-based hysteresis + ML classification.
-  /// Returns weighted average of both signals (50% rule-based, 50% ML).
-  /// Falls back gracefully if ML model unavailable.
-  Future<double> getFusedBeaconConfidence() async {
-    final ruleConfidence = beaconConfidence; // Already 0.0-1.0
-    final mlConfidence = await getMlZoneConfidence();
-
-    // Simple average (can be tuned based on field results)
-    return (ruleConfidence + mlConfidence) / 2.0;
-  }
 
   // ---------------------------------------------------------------------------
   // DISPOSE
@@ -5148,8 +4928,7 @@ class NavigationController extends ChangeNotifier {
 
     _zoneEnteredController.close();
 
-    // Clean up ML resources
-    _zoneClassifier?.dispose();
+
 
     bleScanner.dispose();
 

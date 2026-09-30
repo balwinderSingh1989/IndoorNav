@@ -1,12 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../models/beacon.dart';
 import '../../models/product.dart';
 import '../../models/product_category.dart';
 import '../../services/activity_logger.dart';
 import '../../services/analytics_service.dart';
+import '../../services/beacon_fingerprint_controller.dart';
+import '../../services/beacon_fingerprint_service.dart';
+import '../../services/ble_scanner_service.dart';
 import '../../services/catalog_api_service.dart';
 import '../../services/navigation_controller.dart';
 import '../utils/icon_lookup.dart';
@@ -15,8 +19,8 @@ import '../widgets/live_navigation_card.dart';
 import '../widgets/product_search_delegate.dart';
 import '../widgets/section_header.dart';
 import 'beacon_settings_screen.dart';
+import '../beacon_fingerprint_screen.dart';
 import 'logs_screen.dart';
-import 'ml_data_collection_screen.dart';
 import 'navigation_screen.dart';
 import 'product_listing_screen.dart';
 
@@ -26,9 +30,15 @@ import 'product_listing_screen.dart';
 /// assigned a zone (see [assignZone] — the catalog has no notion of this
 /// app's beacon graph) and opens [NavigationScreen].
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.controller, this.activityLogger});
+  const HomeScreen({
+    super.key,
+    required this.controller,
+    required this.bleScanner,
+    this.activityLogger,
+  });
 
   final NavigationController controller;
+  final BleScannerService bleScanner;
   final ActivityLogger? activityLogger;
 
   @override
@@ -47,6 +57,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<ProductCategory>? _categories;
   Object? _categoriesError;
   List<Product> _offerProducts = const [];
+  bool _motionPermissionDialogVisible = false;
 
   @override
   void initState() {
@@ -63,6 +74,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
     _motionErrorSub = widget.controller.motionService.errors.listen((message) {
       _activityLogger.log('Motion error: $message');
+      if (message.startsWith('Motion permission denied')) {
+        _showMotionPermissionDialog();
+        return;
+      }
       _showError(message);
     });
     _zoneEnteredSub = widget.controller.zoneEnteredStream.listen(_onZoneEntered);
@@ -98,6 +113,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
     );
+  }
+
+  Future<void> _showMotionPermissionDialog() async {
+    if (!mounted || _motionPermissionDialogVisible) return;
+    _motionPermissionDialogVisible = true;
+    final openSettings = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Motion permission needed'),
+        content: const Text(
+          'Step tracking needs motion permission to estimate movement between beacon updates. You can enable it in system settings.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Open settings'),
+          ),
+        ],
+      ),
+    );
+    _motionPermissionDialogVisible = false;
+
+    if (openSettings != true) return;
+    await openAppSettings();
+    if (!mounted) return;
+    await widget.controller.motionService.start();
   }
 
   void _onZoneEntered(Beacon zone) {
@@ -209,13 +255,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  void _openMlDataCollection() {
+  // void _openMlDataCollection() {
+  //   Navigator.of(context).push(
+  //     MaterialPageRoute(
+  //       builder: (_) => MlDataCollectionScreen(
+  //         storeMap: widget.controller.storeMap,
+  //         bleScanner: widget.controller.bleScanner,
+  //       ),
+  //     ),
+  //   );
+  // }
+
+  void _openBeaconFingerprinting() {
+    final fpController = BeaconFingerprintController(
+      BeaconFingerprintService(),
+      widget.bleScanner,
+      widget.controller.storeMap.beacons,
+    );
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => MlDataCollectionScreen(
-          storeMap: widget.controller.storeMap,
-          bleScanner: widget.controller.bleScanner,
-        ),
+        builder: (_) => BeaconFingerprintScreen(controller: fpController),
       ),
     );
   }
@@ -243,6 +302,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         title: const Text('Way Finder'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.location_searching),
+            tooltip: 'Beacon fingerprinting',
+            onPressed: _openBeaconFingerprinting,
+          ),
+          IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Beacon settings',
             onPressed: _openBeaconSettings,
@@ -252,11 +316,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             tooltip: 'Logs & analytics',
             onPressed: _openLogs,
           ),
-          IconButton(
-            icon: const Icon(Icons.smart_toy_outlined),
-            tooltip: 'Collect ML training data',
-            onPressed: _openMlDataCollection,
-          ),
+          // IconButton(
+          //   icon: const Icon(Icons.smart_toy_outlined),
+          //   tooltip: 'Collect ML training data',
+          //   onPressed: _openMlDataCollection,
+          // ),
         ],
       ),
       body: SafeArea(

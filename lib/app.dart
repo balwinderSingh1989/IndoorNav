@@ -45,7 +45,46 @@ class _IndoorNavAppState extends State<IndoorNavApp> {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
 
-          _bleScanner ??= BleScannerService();
+          _bleScanner ??= BleScannerService(
+            // Filter mode: Use kalman for faster response with smoothness
+            filterMode: RssiFilterMode.both,
+            enableComparisonLogging: true,
+            
+            // ===== TUNING PARAMETERS (Sept 28, 16:45) =====
+            // BALANCED TUNING (accuracy-optimized, slight delay acceptable):
+            // Goal: Better noise immunity + prevent multipath flapping
+            // Trade: ~100-200ms extra delay from aggressive, but much more stable
+            
+            // Rationale:
+            // - measurementError 1.0: Kalman gain ~50%, blends equally (new 50%, old 50%)
+            //   Smooths multipath spikes better than 0.6 while still responsive
+            // - processNoise 0.03: Expect moderate RSSI variance (less volatile model)
+            //   Reduces jitter in stationary zones
+            // - initialError 2.5: Moderate initial uncertainty for steady convergence
+            
+            kalmanMeasurementError: 1.0,      // Balanced trust (Kalman gain ~50%)
+            kalmanProcessNoise: 0.03,         // Moderate volatility model for 4-5m
+            kalmanInitialError: 2.5,          // Steady convergence, ~500-700ms total
+            
+            // Reference tunings:
+            // AGGRESSIVE (speed, 250-400ms, flaps at zone boundary):
+            //   measurementError: 0.6, processNoise: 0.07, initialError: 3.5
+            // BALANCED (accuracy, 500-700ms, stable):
+            //   measurementError: 1.0, processNoise: 0.03, initialError: 2.5
+            // SMOOTH (robust, 1000-1500ms, slow but very stable):
+            //   measurementError: 1.5, processNoise: 0.01, initialError: 2.0
+          );
+          
+          // Initialize beacon name lookup for logging
+          final beaconNamesByKey = <String, String>{};
+          for (final beacon in storeMap.beacons) {
+            final key = beacon.fullBleKey ?? beacon.normalizedBleId;
+            if (key != null) {
+              beaconNamesByKey[key] = beacon.name;
+            }
+          }
+          _bleScanner!.setBeaconNameLookup(beaconNamesByKey);
+          
           _controller ??= NavigationController(
             storeMap: storeMap,
             bleScanner: _bleScanner!,
@@ -55,10 +94,10 @@ class _IndoorNavAppState extends State<IndoorNavApp> {
             ),
           );
 
-          // Initialize ML zone classifier asynchronously (fire-and-forget)
-          _controller!.initializeZoneClassifier();
-
-          return HomeScreen(controller: _controller!);
+          return HomeScreen(
+            controller: _controller!,
+            bleScanner: _bleScanner!,
+          );
         },
       ),
     );

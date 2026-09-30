@@ -33,12 +33,20 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    lint {
+        disable += "MultipleNamespaces"
+    }
 }
 
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+dependencies {
+    // TensorFlow dependencies removed for faster pod installation
 }
 
 flutter {
