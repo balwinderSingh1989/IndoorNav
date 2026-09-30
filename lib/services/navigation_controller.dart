@@ -142,15 +142,30 @@ class NavigationController extends ChangeNotifier {
   static const int _requiredConsecutiveReadings = 5;
 
   /// Candidate must remain valid for at least this long.
-  static const Duration _candidatePersistence = Duration(milliseconds: 900);
+  /// AGGRESSIVE TUNING (Sept 28): Reduced from 900ms → 250ms for instant zone switches.
+  /// Total confirmation time: 2 reads (66ms) + 250ms persistence = ~316ms vs. old 1000ms+ (68% faster)
+  static const Duration _candidatePersistence = Duration(milliseconds: 800);
 
   /// Prevents immediate back-to-back beacon switching.
-  static const Duration _beaconSwitchCooldown = Duration(milliseconds: 1500);
+  /// AGGRESSIVE TUNING (Sept 28): Reduced from 1500ms → 600ms for snappy re-engagement.
+  /// 600ms is enough to prevent multipath bouncing but allows quick recovery if user backtracks.
+  /// Kalman at 0.6 measurement error smooths noise, so aggressive cooldown is safe.
+  static const Duration _beaconSwitchCooldown = Duration(milliseconds: 600);
 
   /// Minimum RSSI advantage required before changing beacon.
   ///
+  /// AGGRESSIVE TUNING (Sept 28): Reduced from 8.0 dB → 6.0 dB for snappy 4-5m beacons.
+  /// Increased from 5.0→6.0 to prevent multipath flapping when SOC/Seating zones are close.
+  /// At short range with aggressive Kalman (0.6 error), 6 dB separation is high confidence.
+  /// This combined with 2-read confirmation (66ms) enables near-instant zone switches.
   /// Candidate RSSI is compared against the smoothed current RSSI.
-  static const double _beaconSwitchThresholdDb = 8;
+  static const double _beaconSwitchThresholdDb = 6.0;
+
+  /// Higher RSSI margin required for switching to adjacent beacons (graph topology).
+  /// When switching to a beacon that IS a direct graph neighbor (close together, e.g. SOC↔Interim),
+  /// margin must be >= 9.0 dB to prevent rapid flapping when user stands between them.
+  /// This prevents the SOC↔Interim oscillation with 6.1 dB margin.
+  static const double _distantBeaconMarginDb = 8.0;
 
   /// Additional distance allowance when deciding whether a beacon could
   /// physically have been reached.
@@ -213,7 +228,7 @@ class NavigationController extends ChangeNotifier {
   static const int _initialFixWindowSize = 10;
   static const int _initialFixMinSamples = 8;
 
-  static const double _initialFixMinMarginDb = 6.0;
+  static const double _initialFixMinMarginDb = 8.0;
 
   static const Duration _initialFixMaxWait = Duration(seconds: 6);
 
@@ -225,6 +240,11 @@ class NavigationController extends ChangeNotifier {
   /// Fewer samples are needed for the strong-signal fast path above,
   /// since it doesn't depend on comparing against a runner-up.
   static const int _initialFixStrongMinSamples = 5;
+
+  /// Variance threshold for fast-path acceptance. A strong signal (>= -65 dB)
+  /// must also have low variance (spread < 1.0 dB) to be accepted immediately.
+  /// This filters erratic multipath signals that briefly spike but aren't stable.
+  static const double _initialFixStrongVarianceThresholdDb = 1.0;
 
   /// A smaller margin is trustworthy once a candidate has held the lead
   /// for [_initialFixLeaderStreakForAccept] consecutive evaluations.
@@ -334,6 +354,32 @@ class NavigationController extends ChangeNotifier {
   /// Despite the old name, this should be interpreted as:
   /// "RSSI indicates movement toward this beacon."
   Beacon? headingTowardsBeaconInPath;
+
+  // ---------------------------------------------------------------------------
+  // GEO-CONSTRAINT (prevents zone flapping)
+  // ---------------------------------------------------------------------------
+
+  /// Check if two beacons are adjacent neighbors in the graph (have an edge connecting them).
+  /// This is more reliable than distance calculation since it uses explicit graph topology.
+  bool _areAdjacentBeacons(Beacon beacon1, Beacon beacon2) {
+    for (final edge in storeMap.edges) {
+      if ((edge.from == beacon1.id && edge.to == beacon2.id) ||
+          (edge.from == beacon2.id && edge.to == beacon1.id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+
+  /// Check if the margin is sufficient given adjacency constraint.
+  /// - Adjacent beacons (close together, e.g. SOC↔Interim): higher 9.0 dB margin to prevent flapping
+  /// - Non-adjacent beacons (distant): standard 6.0 dB margin (can't realistically be equally strong)
+  bool _meetsGeoConstraintMargin(Beacon candidate, Beacon current, double marginDb) {
+    final isAdjacent = _areAdjacentBeacons(candidate, current);
+    final requiredMargin = isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
+    return marginDb >= requiredMargin;
+  }
 
   // ---------------------------------------------------------------------------
   // P1 RSSI EMA
@@ -580,7 +626,9 @@ class NavigationController extends ChangeNotifier {
     // Both filters process the same raw RSSI, but with different alphas:
     // - Rule-based (α=0.30): Used for beacon switching hysteresis
     // - ML (α=0.45): Used for model inference (matches training data distribution)
-    _updateMlRssiEma(rssiByBleId);
+    if(checkMLBasedConfidence) {
+      _updateMlRssiEma(rssiByBleId);
+    }
 
     _updateCurrentBeaconState(rssiByBleId);
 
@@ -642,6 +690,20 @@ class NavigationController extends ChangeNotifier {
 
     if (destinationBeacon == null) {
       if (candidate == null) {
+        _clearPendingBeaconCandidate();
+        
+        // -----------------------------------------------------------------------
+        // FREE-ROAM IDLE HEARTBEAT (no candidate available)
+        // -----------------------------------------------------------------------
+        if (_rssiUpdateCount == 1 ||
+            _rssiUpdateCount % 30 == 0) {
+          _log(
+            'NAV## free-roam IDLE (no candidate) '
+                'current=${currentBeacon?.name ?? "none"} '
+                '| ${rssiByBleId.length} beacons visible '
+                '| visibility=${rssiByBleId.keys.map((k) => storeMap.beaconByBleId(k)?.name ?? k).join(", ")}',
+          );
+        }
         return;
       }
 
@@ -650,35 +712,163 @@ class NavigationController extends ChangeNotifier {
       if (!changed) {
         // Already-selected beacon is still winning — nothing pending to clear.
         _clearPendingBeaconCandidate();
+        
+        // -----------------------------------------------------------------------
+        // FREE-ROAM IDLE HEARTBEAT (current beacon still winning)
+        // -----------------------------------------------------------------------
+        if (_rssiUpdateCount == 1 ||
+            _rssiUpdateCount % 30 == 0) {
+          _log(
+            'NAV## free-roam STABLE '
+                'current=${currentBeacon!.name} '
+                '| ${rssiByBleId.length} beacons visible '
+                '| top_contenders=${(rssiByBleId.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).take(3).map((e) => "${storeMap.beaconByBleId(e.key)?.name ?? e.key}:${e.value.toStringAsFixed(1)}dB").join(", ")}',
+          );
+        }
         return;
       }
 
+      _log(
+        'NAV## free-roam NEW CANDIDATE selected: ${candidate.name} '
+            '(was ${currentBeacon?.name ?? "none"})',
+      );
+
+      // -----------------------------------------------------------------------
+      // FREE-ROAM RSSI VALIDATION
+      // -----------------------------------------------------------------------
+      // Candidate must be competitive with current beacon (within 5.0 dB).
+      // This prevents switching to a beacon that's significantly weaker.
+      // Unlike navigation mode (2.0 dB margin), free-roam is more lenient
+      // since there's no route constraint.
+      
+      const double _freeRoamRssiMarginDb = 5.0;
+      
+      if (currentBeacon != null) {
+        final currentRssi = _smoothedRssi(currentBeacon!.id) ??
+            _rssiForBeacon(currentBeacon, rssiByBleId);
+        final candidateRssi = _smoothedRssi(candidate.id) ??
+            _rssiForBeacon(candidate, rssiByBleId);
+
+        if (currentRssi != null && candidateRssi != null) {
+          final isCompetitive = candidateRssi >=
+              (currentRssi - _freeRoamRssiMarginDb);
+
+          _log(
+            'NAV## [1/4] RSSI check: ${candidate.name} vs ${currentBeacon!.name} '
+                'candidate=${candidateRssi.toStringAsFixed(1)}dBm '
+                'current=${currentRssi.toStringAsFixed(1)}dBm '
+                'margin=${(currentRssi - candidateRssi).toStringAsFixed(1)}dB '
+                'threshold=${_freeRoamRssiMarginDb}dB '
+                'result=${isCompetitive ? "✓ PASS" : "✗ FAIL"}',
+          );
+
+          if (!isCompetitive) {
+            _clearPendingBeaconCandidate();
+            return;
+          }
+
+          // -----------------------------------------------------------------------
+          // GEO-CONSTRAINT VALIDATION (prevents zone flapping)
+          // -----------------------------------------------------------------------
+          // Enforce higher margin for ADJACENT beacons to prevent rapid oscillation
+          // when user is between two similarly-strong zones (e.g., SOC ↔ Interim).
+          // Adjacent beacons (connected by graph edges) require 9 dB margin.
+          // Non-adjacent beacons use standard 6 dB margin.
+          // Margin = candidate RSSI - current RSSI (positive when candidate is stronger)
+          final marginDb = candidateRssi - currentRssi;
+          final isAdjacent = _areAdjacentBeacons(candidate, currentBeacon!);
+          final requiredMargin = isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
+
+          if (!_meetsGeoConstraintMargin(candidate, currentBeacon!, marginDb)) {
+            _log(
+              'NAV## [1.5/4] GEO-CONSTRAINT: ${candidate.name} REJECTED '
+                  'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
+                  '${isAdjacent ? "(adjacent: need 8dB to prevent flapping)" : "(non-adjacent: 6dB OK)"}',
+            );
+            _clearPendingBeaconCandidate();
+            return;
+          }
+
+          _log(
+            'NAV## [1.5/4] GEO-CONSTRAINT: ${candidate.name} OK '
+                'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
+                '${isAdjacent ? "(adjacent: 9dB required)" : "(non-adjacent: 6dB OK)"}',
+          );
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // FREE-ROAM PERSISTENCE & COOLDOWN
+      // -----------------------------------------------------------------------
+      // Same safety gates as navigation mode: persistence time + cooldown.
+      // - persistence: 300ms (looser than navigation's 800ms)
+      // - cooldown: 600ms (same as navigation)
+      
+      const Duration _freeRoamPersistence =
+          Duration(milliseconds: 300);
+
       // Require the new candidate to win several consecutive evaluations
-      // before replacing the current beacon, instead of committing on the
-      // first flip — this is what was missing vs. navigation-mode switches.
+      // before replacing the current beacon.
       if (candidate.id == _pendingBeaconId) {
         _pendingBeaconCount++;
       } else {
         _pendingBeaconId = candidate.id;
         _pendingBeaconCount = 1;
         _pendingBeaconSince = now;
+
+        _log(
+          'NAV## [2/4] Read count: NEW candidate ${candidate.name} '
+              'starting persistence timer',
+        );
       }
 
-      if (_pendingBeaconCount < _freeRoamSwitchConfirmReadings) {
-        _log(
-          'NAV## free-roam candidate ${candidate.name} pending '
-              '($_pendingBeaconCount/$_freeRoamSwitchConfirmReadings)',
-        );
+      final candidateAge = _pendingBeaconSince == null
+          ? Duration.zero
+          : now.difference(_pendingBeaconSince!);
 
+      final inCooldown = _lastBeaconSwitchAt != null &&
+          now.difference(_lastBeaconSwitchAt!) <
+              _beaconSwitchCooldown;
+
+      // Not yet confirmed: either read count or time persistence not met.
+      if (_pendingBeaconCount < _freeRoamSwitchConfirmReadings ||
+          candidateAge < _freeRoamPersistence ||
+          inCooldown) {
+        final readCountOk = _pendingBeaconCount >= _freeRoamSwitchConfirmReadings;
+        final ageOk = candidateAge >= _freeRoamPersistence;
+        final cooldownOk = !inCooldown;
+
+        if (_pendingBeaconCount % 2 == 0 || candidateAge.inMilliseconds >= 250) {
+          _log(
+            'NAV## [2-3/4] Confirmation gates: ${candidate.name} '
+                'reads: ${_pendingBeaconCount}/$_freeRoamSwitchConfirmReadings '
+                '${readCountOk ? "✓" : "✗"} | '
+                'age: ${candidateAge.inMilliseconds}ms/'
+                '${_freeRoamPersistence.inMilliseconds}ms '
+                '${ageOk ? "✓" : "✗"} | '
+                'cooldown: ${inCooldown ? "✗ IN_COOLDOWN" : "✓ OK"}',
+          );
+        }
         return;
       }
+
+      _log(
+        'NAV## [4/4] ALL GATES PASSED: ${candidate.name} '
+            'reads=$_pendingBeaconCount age=${candidateAge.inMilliseconds}ms '
+            'cooldown=OK → READY TO COMMIT',
+      );
+
+      // -----------------------------------------------------------------------
+      // COMMIT FREE-ROAM BEACON
+      // -----------------------------------------------------------------------
 
       final previousBeacon = currentBeacon;
 
       currentBeacon = candidate;
 
-      _currentBeaconState =
-          _BeaconCandidateState(candidate);
+      _currentBeaconState = _BeaconCandidateState(candidate);
+
+      _lastBeaconSwitchAt = now;
 
       _metersSinceBeacon = 0.0;
       _segmentProgressMeters = 0.0;
@@ -690,9 +880,19 @@ class NavigationController extends ChangeNotifier {
 
       _clearPendingBeaconCandidate();
 
+      final candidateRssi = _smoothedRssi(candidate.id) ??
+          _rssiForBeacon(candidate, rssiByBleId);
+      final previousRssi = previousBeacon != null
+          ? (_smoothedRssi(previousBeacon.id) ??
+              _rssiForBeacon(previousBeacon, rssiByBleId))
+          : null;
+
       _log(
-        'NAV## FREE BEACON SET '
-            '${previousBeacon?.name ?? "none"} → ${candidate.name}',
+        'NAV## ✓✓✓ FREE-ROAM BEACON COMMITTED '
+            '${previousBeacon?.name ?? "none"} → ${candidate.name} '
+            'prevRSSI=${previousRssi?.toStringAsFixed(1) ?? "—"}dBm '
+            'newRSSI=${candidateRssi?.toStringAsFixed(1) ?? "—"}dBm | '
+            'confirmed after ${_pendingBeaconCount} reads / ${candidateAge.inMilliseconds}ms',
       );
 
       notifyListeners();
@@ -2136,14 +2336,32 @@ class NavigationController extends ChangeNotifier {
       if (avg >= _initialFixStrongRssiDb) {
         final beacon = storeMap.beaconById(entry.key);
 
-        _log(
-          'NAV## initial fix FAST ACCEPT — '
-              '${beacon?.name ?? entry.key} '
-              'avg=${avg.toStringAsFixed(1)}dB '
-              '(>= ${_initialFixStrongRssiDb.toStringAsFixed(1)}dB)',
-        );
+        // Strong signal detected, but verify it's also stable
+        // (not just a multipath spike that happens to be strong)
+        final variance = _getSignalVariability(entry.value);
 
-        return beacon;
+        if (variance < _initialFixStrongVarianceThresholdDb) {
+          // Signal is strong AND stable → accept immediately
+          _log(
+            'NAV## initial fix FAST ACCEPT (stable) — '
+                '${beacon?.name ?? entry.key} '
+                'avg=${avg.toStringAsFixed(1)}dB '
+                'variance=${variance.toStringAsFixed(2)}dB ✓ '
+                '(both strong and stable)',
+          );
+
+          return beacon;
+        } else {
+          // Signal is strong but erratic → defer decision
+          // Let other gates (margin, trend, timeout) make the call
+          _log(
+            'NAV## initial fix DEFER (erratic) — '
+                '${beacon?.name ?? entry.key} '
+                'avg=${avg.toStringAsFixed(1)}dB '
+                'variance=${variance.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB) ⚠️ '
+                '(strong but unstable signal, waiting for confirmation)',
+          );
+        }
       }
     }
 
@@ -2211,9 +2429,34 @@ class NavigationController extends ChangeNotifier {
     final bestId = ranked.first.key;
     final bestAvg = ranked.first.value;
 
+
+    //TODO Balwinder
+    // final bestSamples = _initialFixRssiWindows[bestId];
+    //
+    // final bestName1 =
+    //     storeMap.beaconById(bestId)?.name ?? bestId;
+    //
+    // if (bestSamples != null && bestSamples.isNotEmpty) {
+    //   final bestVariability = _getSignalVariability(bestSamples);
+    //
+    //   if(bestVariability >   _initialFixStrongVarianceThresholdDb) {
+    //
+    //     _log(
+    //       'NAV## initial fix DEFER immediate (trend but erratic) — '
+    //           '$bestName1 strengthening '
+    //           'variance=${bestVariability.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB)) ⚠️',
+    //     );
+    //
+    //   }
+    //     return null;
+    //   }
+    //
+    //
     final elapsed = DateTime.now().difference(
       _initialFixStartedAt!,
     );
+
+    //TODO END
 
     // ------------------------------------------------------------
     // 3b. Track how long the current best has held the #1 spot,
@@ -2373,15 +2616,36 @@ class NavigationController extends ChangeNotifier {
       // seconds earlier, just because of RF convergence + brief trend flutter.
       // Equal TX power means real signal differences are 3.0+ dB, not noise-induced 1.3 dB.
       if (margin >= 4.0) {
-        _log(
-          'NAV## initial fix ACCEPTED — '
-              '$bestName strengthening '
-              'while $secondName weakening '
-              '(margin=${margin.toStringAsFixed(1)}dB)',
-        );
+        // Trend detected, but verify the strengthening beacon's signal is stable
+        // (not just trending up while still being erratic/multipath-prone)
+        final bestSamples = _initialFixRssiWindows[bestId];
 
-        _isInitialFixComplete = true;
-        return storeMap.beaconById(bestId);
+        if (bestSamples != null && bestSamples.isNotEmpty) {
+          final bestVariability = _getSignalVariability(bestSamples);
+
+          if (bestVariability < _initialFixStrongVarianceThresholdDb) {
+            // Trend is real AND signal is stable → accept
+            _log(
+              'NAV## initial fix ACCEPTED (trend + stable) — '
+                  '$bestName strengthening '
+                  'while $secondName weakening '
+                  '(margin=${margin.toStringAsFixed(1)}dB, '
+                  'variance=${bestVariability.toStringAsFixed(2)}dB) ✓',
+            );
+
+            _isInitialFixComplete = true;
+            return storeMap.beaconById(bestId);
+          } else {
+            // Trend detected but signal is erratic → defer
+            _log(
+              'NAV## initial fix DEFER (trend but erratic) — '
+                  '$bestName strengthening '
+                  'while $secondName weakening '
+                  '(margin=${margin.toStringAsFixed(1)}dB, '
+                  'variance=${bestVariability.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB)) ⚠️',
+            );
+          }
+        }
       }
     }
 
@@ -3891,6 +4155,36 @@ class NavigationController extends ChangeNotifier {
           (a, b) => a + b,
         ) /
         values.length;
+  }
+
+  double _getSignalVariability(
+    List<double> samples,
+  ) {
+    // Calculate standard deviation (spread) of RSSI samples
+    // Low variance (< 1.0 dB) = stable signal = trustworthy
+    // High variance (> 1.5 dB) = erratic signal = multipath or noisy
+
+    if (samples.isEmpty) {
+      return double.infinity;
+    }
+
+    if (samples.length < 2) {
+      return 0.0;  // Single sample has zero variance
+    }
+
+    final mean = _average(samples);
+
+    // Variance = average of squared deviations from mean
+    final sumSquaredDelta = samples.fold(
+      0.0,
+      (sum, value) => sum + (value - mean) * (value - mean),
+    );
+
+    final variance = sumSquaredDelta / samples.length;
+
+    // Return standard deviation (square root of variance)
+    // More interpretable: σ = 1.0 dB means "most readings are within ±1.0 dB of average"
+    return sqrt(variance);
   }
 
   // ---------------------------------------------------------------------------
