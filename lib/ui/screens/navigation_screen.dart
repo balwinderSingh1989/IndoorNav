@@ -2,9 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../../models/beacon.dart';
 import '../../models/product.dart';
-import '../../services/navigation_controller.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../widgets/live_navigation_card.dart';
 import '../widgets/section_header.dart';
 
@@ -14,7 +13,8 @@ import '../widgets/section_header.dart';
 /// from the home screen's own map preview for a focused view of the same
 /// [LiveNavigationCard].
 class NavigationScreen extends StatefulWidget {
-  const NavigationScreen({super.key, required this.controller, this.catalogOffers = const []});
+  const NavigationScreen(
+      {super.key, required this.controller, this.catalogOffers = const []});
 
   final NavigationController controller;
 
@@ -37,7 +37,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // scanning/motion tracking run continuously for the app's lifetime, not
     // just while this screen is on screen. Error snackbars are re-listened
     // here too, so they surface wherever the user currently is.
-    _scanErrorSub = widget.controller.bleScanner.errors.listen(_showError);
+    _scanErrorSub = widget.controller.observationErrors.listen(_showError);
     _motionErrorSub = widget.controller.motionService.errors.listen(_showError);
   }
 
@@ -68,14 +68,16 @@ class _NavigationScreenState extends State<NavigationScreen> {
         return Scaffold(
           backgroundColor: colorScheme.surface,
           appBar: AppBar(
-            title: Text(controller.destinationBeacon?.name ?? 'Live Navigation'),
+            title:
+                Text(controller.destinationBeacon?.name ?? 'Live Navigation'),
             actions: [
               PopupMenuButton<Beacon>(
                 icon: const Icon(Icons.place_outlined),
                 tooltip: 'Choose destination',
                 onSelected: controller.setDestination,
-                itemBuilder: (context) =>
-                    storeMap.beacons.map((b) => PopupMenuItem(value: b, child: Text(b.name))).toList(),
+                itemBuilder: (context) => storeMap.beacons
+                    .map((b) => PopupMenuItem(value: b, child: Text(b.name)))
+                    .toList(),
               ),
             ],
           ),
@@ -94,7 +96,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                LiveNavigationCard(controller: controller, catalogOffers: widget.catalogOffers),
+                LiveNavigationCard(
+                    controller: controller,
+                    catalogOffers: widget.catalogOffers),
               ],
             ),
           ),

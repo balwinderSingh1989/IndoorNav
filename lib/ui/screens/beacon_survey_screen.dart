@@ -5,12 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../../models/beacon.dart';
-import '../../models/store_map.dart';
-import '../../services/ble_scanner_service.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 class BeaconSurveyScreen extends StatefulWidget {
-  const BeaconSurveyScreen({super.key, required this.storeMap, required this.bleScanner});
+  const BeaconSurveyScreen(
+      {super.key, required this.storeMap, required this.bleScanner});
 
   final StoreMap storeMap;
   final BleScannerService bleScanner;
@@ -65,8 +64,10 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
       );
 
   Offset _mapPosition(Offset screenPosition, Size size) => Offset(
-        (screenPosition.dx * widget.storeMap.mapWidth / size.width).clamp(0.0, widget.storeMap.mapWidth),
-        (screenPosition.dy * widget.storeMap.mapHeight / size.height).clamp(0.0, widget.storeMap.mapHeight),
+        (screenPosition.dx * widget.storeMap.mapWidth / size.width)
+            .clamp(0.0, widget.storeMap.mapWidth),
+        (screenPosition.dy * widget.storeMap.mapHeight / size.height)
+            .clamp(0.0, widget.storeMap.mapHeight),
       );
 
   void _recordTap(TapUpDetails details, Size size) {
@@ -111,30 +112,41 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
           {
             'from': widget.storeMap.edges[i].from,
             'to': widget.storeMap.edges[i].to,
-            'distanceMeters': double.tryParse(_distanceControllers[i].text.trim()) ?? widget.storeMap.edges[i].distanceMeters,
+            'distanceMeters':
+                double.tryParse(_distanceControllers[i].text.trim()) ??
+                    widget.storeMap.edges[i].distanceMeters,
             if (_surveyedWaypoints[i]!.isNotEmpty)
               'waypoints': [
                 for (final point in _surveyedWaypoints[i]!)
-                  {'x': double.parse(point.dx.toStringAsFixed(2)), 'y': double.parse(point.dy.toStringAsFixed(2))},
+                  {
+                    'x': double.parse(point.dx.toStringAsFixed(2)),
+                    'y': double.parse(point.dy.toStringAsFixed(2))
+                  },
               ],
           },
       ],
     };
-    await Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(payload)));
+    await Clipboard.setData(ClipboardData(
+        text: const JsonEncoder.withIndent('  ').convert(payload)));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Survey JSON copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Survey JSON copied')));
   }
 
   String? _validationMessage() {
     for (final entry in _surveyedPositions.entries) {
       final position = entry.value;
-      if (position.dx < 0 || position.dx > widget.storeMap.mapWidth || position.dy < 0 || position.dy > widget.storeMap.mapHeight) {
+      if (position.dx < 0 ||
+          position.dx > widget.storeMap.mapWidth ||
+          position.dy < 0 ||
+          position.dy > widget.storeMap.mapHeight) {
         return '${entry.key} is outside the SVG bounds';
       }
     }
     for (var i = 0; i < widget.storeMap.edges.length; i++) {
       final value = double.tryParse(_distanceControllers[i].text.trim());
-      if (value == null || value <= 0) return 'Edge ${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to} needs a positive distance';
+      if (value == null || value <= 0)
+        return 'Edge ${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to} needs a positive distance';
     }
     return null;
   }
@@ -156,16 +168,23 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text('Tap the actual mounted location for the selected beacon. Coordinates are converted back to SVG units automatically.', style: Theme.of(context).textTheme.bodyMedium),
+          Text(
+              'Tap the actual mounted location for the selected beacon. Coordinates are converted back to SVG units automatically.',
+              style: Theme.of(context).textTheme.bodyMedium),
           const SizedBox(height: 12),
           DropdownButtonFormField<Beacon>(
             initialValue: _selectedBeacon,
-            decoration: const InputDecoration(labelText: 'Beacon to survey', border: OutlineInputBorder()),
+            decoration: const InputDecoration(
+                labelText: 'Beacon to survey', border: OutlineInputBorder()),
             items: [
               for (final beacon in widget.storeMap.beacons)
-                DropdownMenuItem(value: beacon, child: Text('${beacon.id} · ${beacon.name}')),
+                DropdownMenuItem(
+                    value: beacon,
+                    child: Text('${beacon.id} · ${beacon.name}')),
             ],
-            onChanged: (beacon) => beacon == null ? null : setState(() => _selectedBeacon = beacon),
+            onChanged: (beacon) => beacon == null
+                ? null
+                : setState(() => _selectedBeacon = beacon),
           ),
           const SizedBox(height: 12),
           AspectRatio(
@@ -173,8 +192,12 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final size = Size(constraints.maxWidth, constraints.maxHeight);
-                final selectedEdge = _selectedEdgeIndex == null ? null : widget.storeMap.edges[_selectedEdgeIndex!];
-                final selectedWaypoints = _selectedEdgeIndex == null ? const <Offset>[] : _surveyedWaypoints[_selectedEdgeIndex!]!;
+                final selectedEdge = _selectedEdgeIndex == null
+                    ? null
+                    : widget.storeMap.edges[_selectedEdgeIndex!];
+                final selectedWaypoints = _selectedEdgeIndex == null
+                    ? const <Offset>[]
+                    : _surveyedWaypoints[_selectedEdgeIndex!]!;
                 return GestureDetector(
                   onTapUp: (details) => _recordTap(details, size),
                   child: Stack(
@@ -182,22 +205,37 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                     children: [
                       ClipRRect(
                         borderRadius: BorderRadius.circular(12),
-                        child: SvgPicture.asset(widget.storeMap.mapAsset, fit: BoxFit.contain),
+                        child: SvgPicture.asset(widget.storeMap.mapAsset,
+                            fit: BoxFit.contain),
                       ),
                       for (final beacon in widget.storeMap.beacons)
                         Positioned(
-                          left: _screenPosition(_surveyedPositions[beacon.id]!, size).dx - 10,
-                          top: _screenPosition(_surveyedPositions[beacon.id]!, size).dy - 10,
+                          left: _screenPosition(
+                                      _surveyedPositions[beacon.id]!, size)
+                                  .dx -
+                              10,
+                          top: _screenPosition(
+                                      _surveyedPositions[beacon.id]!, size)
+                                  .dy -
+                              10,
                           child: IgnorePointer(
                             child: Container(
                               width: 20,
                               height: 20,
                               decoration: BoxDecoration(
-                                color: beacon.id == _selectedBeacon.id ? Colors.red : Colors.blue,
+                                color: beacon.id == _selectedBeacon.id
+                                    ? Colors.red
+                                    : Colors.blue,
                                 shape: BoxShape.circle,
-                                border: Border.all(color: Colors.white, width: 2),
+                                border:
+                                    Border.all(color: Colors.white, width: 2),
                               ),
-                              child: Center(child: Text(beacon.id.replaceFirst('b', ''), style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))),
+                              child: Center(
+                                  child: Text(beacon.id.replaceFirst('b', ''),
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold))),
                             ),
                           ),
                         ),
@@ -214,7 +252,9 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                               child: Container(
                                 width: 10,
                                 height: 10,
-                                decoration: const BoxDecoration(color: Colors.orange, shape: BoxShape.circle),
+                                decoration: const BoxDecoration(
+                                    color: Colors.orange,
+                                    shape: BoxShape.circle),
                               ),
                             ),
                           ),
@@ -226,7 +266,8 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                                 ...selectedWaypoints,
                                 _surveyedPositions[selectedEdge.to]!,
                               ],
-                              mapSize: Size(widget.storeMap.mapWidth, widget.storeMap.mapHeight),
+                              mapSize: Size(widget.storeMap.mapWidth,
+                                  widget.storeMap.mapHeight),
                             ),
                           ),
                       ],
@@ -237,18 +278,22 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Text('Selected ${_selectedBeacon.id}: (${_surveyedPositions[_selectedBeacon.id]!.dx.toStringAsFixed(1)}, ${_surveyedPositions[_selectedBeacon.id]!.dy.toStringAsFixed(1)})'),
+          Text(
+              'Selected ${_selectedBeacon.id}: (${_surveyedPositions[_selectedBeacon.id]!.dx.toStringAsFixed(1)}, ${_surveyedPositions[_selectedBeacon.id]!.dy.toStringAsFixed(1)})'),
           const SizedBox(height: 16),
-          Text('Measured corridor distances', style: Theme.of(context).textTheme.titleMedium),
+          Text('Measured corridor distances',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           for (var i = 0; i < widget.storeMap.edges.length; i++)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: TextField(
                 controller: _distanceControllers[i],
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
                 decoration: InputDecoration(
-                  labelText: '${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to}',
+                  labelText:
+                      '${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to}',
                   suffixText: 'm',
                   border: const OutlineInputBorder(),
                 ),
@@ -256,16 +301,22 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
               ),
             ),
           const SizedBox(height: 16),
-          Text('Waypoint editing', style: Theme.of(context).textTheme.titleMedium),
+          Text('Waypoint editing',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          const Text('Select an edge, enable waypoint mode, then tap corridor bends on the map in order.'),
+          const Text(
+              'Select an edge, enable waypoint mode, then tap corridor bends on the map in order.'),
           const SizedBox(height: 8),
           DropdownButtonFormField<int>(
             initialValue: _selectedEdgeIndex,
-            decoration: const InputDecoration(labelText: 'Edge to shape', border: OutlineInputBorder()),
+            decoration: const InputDecoration(
+                labelText: 'Edge to shape', border: OutlineInputBorder()),
             items: [
               for (var i = 0; i < widget.storeMap.edges.length; i++)
-                DropdownMenuItem(value: i, child: Text('${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to}')),
+                DropdownMenuItem(
+                    value: i,
+                    child: Text(
+                        '${widget.storeMap.edges[i].from} -> ${widget.storeMap.edges[i].to}')),
             ],
             onChanged: (index) => setState(() => _selectedEdgeIndex = index),
           ),
@@ -276,31 +327,46 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
                 ? 'Select an edge first'
                 : '${_surveyedWaypoints[_selectedEdgeIndex!]!.length} waypoint(s) recorded'),
             value: _waypointMode,
-            onChanged: _selectedEdgeIndex == null ? null : (enabled) => setState(() => _waypointMode = enabled),
+            onChanged: _selectedEdgeIndex == null
+                ? null
+                : (enabled) => setState(() => _waypointMode = enabled),
           ),
           Row(
             children: [
-              OutlinedButton.icon(onPressed: _waypointMode ? _undoWaypoint : null, icon: const Icon(Icons.undo), label: const Text('Undo')),
+              OutlinedButton.icon(
+                  onPressed: _waypointMode ? _undoWaypoint : null,
+                  icon: const Icon(Icons.undo),
+                  label: const Text('Undo')),
               const SizedBox(width: 8),
-              OutlinedButton.icon(onPressed: _waypointMode ? _clearWaypoints : null, icon: const Icon(Icons.clear), label: const Text('Clear')),
+              OutlinedButton.icon(
+                  onPressed: _waypointMode ? _clearWaypoints : null,
+                  icon: const Icon(Icons.clear),
+                  label: const Text('Clear')),
             ],
           ),
           if (_selectedEdgeIndex != null)
-            Text('Waypoints: ${_surveyedWaypoints[_selectedEdgeIndex!]!.map((point) => '(${point.dx.toStringAsFixed(1)}, ${point.dy.toStringAsFixed(1)})').join(' -> ')}'),
+            Text(
+                'Waypoints: ${_surveyedWaypoints[_selectedEdgeIndex!]!.map((point) => '(${point.dx.toStringAsFixed(1)}, ${point.dy.toStringAsFixed(1)})').join(' -> ')}'),
           const SizedBox(height: 16),
-          Text('Nearby beacons', style: Theme.of(context).textTheme.titleMedium),
+          Text('Nearby beacons',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          const Text('Use the strongest RSSI and identity fields to identify the physical unit you are standing near.'),
+          const Text(
+              'Use the strongest RSSI and identity fields to identify the physical unit you are standing near.'),
           const SizedBox(height: 8),
           if (_nearbyBeacons.isEmpty)
-            const Text('No recognized beacons yet. Keep Bluetooth enabled and wait for a scan.')
+            const Text(
+                'No recognized beacons yet. Keep Bluetooth enabled and wait for a scan.')
           else
             ..._nearbyBeacons.map((info) {
               final configured = widget.storeMap.beaconByBleId(info.key);
               return Card(
                 child: ListTile(
-                  leading: CircleAvatar(child: Text(info.rssi.round().toString())),
-                  title: Text(configured == null ? 'Unconfigured beacon' : '${configured.id} · ${configured.name}'),
+                  leading:
+                      CircleAvatar(child: Text(info.rssi.round().toString())),
+                  title: Text(configured == null
+                      ? 'Unconfigured beacon'
+                      : '${configured.id} · ${configured.name}'),
                   subtitle: Text('RSSI ${info.rssi.toStringAsFixed(1)} dBm\n'
                       'Identity: ${info.key}\n'
                       'Scanner ID: ${info.scannerId}\n'
@@ -313,7 +379,8 @@ class _BeaconSurveyScreenState extends State<BeaconSurveyScreen> {
               );
             }),
           if (validation != null)
-            Text(validation, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            Text(validation,
+                style: TextStyle(color: Theme.of(context).colorScheme.error)),
           const SizedBox(height: 8),
           FilledButton.icon(
             onPressed: validation == null ? _copyExport : null,

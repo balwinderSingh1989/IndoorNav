@@ -7,12 +7,12 @@ import 'package:flutter/foundation.dart';
 
 import '../models/beacon.dart';
 import '../models/store_map.dart';
-import 'ble_scanner_service.dart';
-import 'motion_service.dart';
-import 'activity_logger.dart';
-import 'pathfinding_service.dart';
-import 'zone_snap_service.dart';
-import 'zone_snap_service.dart';
+import '../config/indoor_nav_config.dart';
+import '../motion/motion_service.dart';
+import '../logging/activity_logger.dart';
+import '../observations/beacon_observation_source.dart';
+import '../routing/pathfinding_service.dart';
+import '../positioning/zone_snap_service.dart';
 
 enum NavigationStatus {
   idle,
@@ -62,8 +62,6 @@ class _BeaconCandidateState {
   _BeaconCandidateState(this.beacon);
 }
 
-
-
 /// Central navigation state.
 ///
 /// BLE provides discrete beacon observations.
@@ -81,23 +79,24 @@ class _BeaconCandidateState {
 class NavigationController extends ChangeNotifier {
   NavigationController({
     required this.storeMap,
-    required this.bleScanner,
     required this.motionService,
+    required BeaconObservationSource observationSource,
     ZoneSnapService? zoneSnap,
     PathfindingService? pathfinder,
+    IndoorNavConfig? navigationConfig,
     this.allowOffRouteBeacons = true,
     this.logger,
   })  : _zoneSnap = zoneSnap ?? ZoneSnapService(),
-        _pathfinder = pathfinder ?? PathfindingService() {
-    _rssiSub = bleScanner.rssiStream.listen(_onRssiUpdate);
+        _pathfinder = pathfinder ?? PathfindingService(),
+        navigationConfig = navigationConfig ?? const IndoorNavConfig(),
+        _observationSource = observationSource {
+    _rssiSub = _observationSource.rssiStream.listen(_onRssiUpdate);
 
     _stepSub = motionService.stepDistances.listen(_onStep);
 
     _motionErrorSub = motionService.errors.listen(
       (e) => _log('NAV## motion error: $e'),
     );
-
-
 
     // Reserved for future movement-direction support.
     //
@@ -113,10 +112,16 @@ class NavigationController extends ChangeNotifier {
 
   _BeaconCandidateState? _currentBeaconState;
 
-  static const double _secondaryOvertakeMarginDb = 1.5;
-  static const double _candidatePeakToleranceDb = 1.5;
+  double get _secondaryOvertakeMarginDb =>
+      navigationConfig.secondaryOvertakeMarginDb;
+  double get _candidatePeakToleranceDb =>
+      navigationConfig.candidatePeakToleranceDb;
 
-  static const int _candidateWeakeningReadingsRequired = 2;
+  int get _candidateWeakeningReadingsRequired =>
+      navigationConfig.candidateWeakeningReadingsRequired;
+
+  /// Site-specific tuning loaded from the engine's JSON configuration.
+  final IndoorNavConfig navigationConfig;
 
   final Map<String, List<double>> _rssiHistory = {};
 
@@ -127,18 +132,19 @@ class NavigationController extends ChangeNotifier {
   /// the selected candidate before it can be confirmed.
   ///
   /// Increased from 3 -> 5 to reduce noisy beacon switching.
-  static const int _requiredConsecutiveReadings = 5;
+  int get _requiredConsecutiveReadings =>
+      navigationConfig.requiredConsecutiveReadings;
 
   /// Candidate must remain valid for at least this long.
   /// AGGRESSIVE TUNING (Sept 28): Reduced from 900ms → 250ms for instant zone switches.
   /// Total confirmation time: 2 reads (66ms) + 250ms persistence = ~316ms vs. old 1000ms+ (68% faster)
-  static const Duration _candidatePersistence = Duration(milliseconds: 800);
+  Duration get _candidatePersistence => navigationConfig.candidatePersistence;
 
   /// Prevents immediate back-to-back beacon switching.
   /// AGGRESSIVE TUNING (Sept 28): Reduced from 1500ms → 600ms for snappy re-engagement.
   /// 600ms is enough to prevent multipath bouncing but allows quick recovery if user backtracks.
   /// Kalman at 0.6 measurement error smooths noise, so aggressive cooldown is safe.
-  static const Duration _beaconSwitchCooldown = Duration(milliseconds: 600);
+  Duration get _beaconSwitchCooldown => navigationConfig.switchCooldown;
 
   /// Minimum RSSI advantage required before changing beacon.
   ///
@@ -147,24 +153,25 @@ class NavigationController extends ChangeNotifier {
   /// At short range with aggressive Kalman (0.6 error), 6 dB separation is high confidence.
   /// This combined with 2-read confirmation (66ms) enables near-instant zone switches.
   /// Candidate RSSI is compared against the smoothed current RSSI.
-  static const double _beaconSwitchThresholdDb = 6.0;
+  double get _beaconSwitchThresholdDb =>
+      navigationConfig.standardSwitchMarginDb;
 
   /// Higher RSSI margin required for switching to adjacent beacons (graph topology).
   /// When switching to a beacon that IS a direct graph neighbor (close together, e.g. SOC↔Interim),
   /// margin must be >= 9.0 dB to prevent rapid flapping when user stands between them.
   /// This prevents the SOC↔Interim oscillation with 6.1 dB margin.
-  static const double _distantBeaconMarginDb = 8.0;
+  double get _distantBeaconMarginDb => navigationConfig.adjacentSwitchMarginDb;
 
   /// Additional distance allowance when deciding whether a beacon could
   /// physically have been reached.
-  static const double _reachabilityToleranceMeters = 2;
+  double get _reachabilityToleranceMeters =>
+      navigationConfig.reachabilityToleranceMeters;
 
   /// Free-roam (no destination) candidate must win this many consecutive
   /// evaluations before replacing the current beacon — a single noisy
   /// ranking flip previously committed instantly with no hysteresis.
-  static const int _freeRoamSwitchConfirmReadings = 5;
-
-
+  int get _freeRoamSwitchConfirmReadings =>
+      navigationConfig.freeRoamSwitchConfirmReadings;
 
   /// When false:
   ///   Only the immediate next route beacon can trigger a switch.
@@ -178,19 +185,18 @@ class NavigationController extends ChangeNotifier {
   /// PDR/geometry never authorizes a beacon transition.
   bool _enableRouteLookAhead = true;
 
-
-
   bool checkMLBasedConfidence = false;
 
   /// Visual smoothing tick.
-  static const Duration _followTickInterval = Duration(milliseconds: 50);
+  Duration get _followTickInterval => navigationConfig.followTickInterval;
 
   /// Existing visual interpolation factor.
-  static const double _visualBlendPerTick = 0.35;
+  double get _visualBlendPerTick => navigationConfig.visualBlendPerTick;
 
   /// If the confirmed beacon is extremely far from the rendered position,
   /// treat it as recovery rather than trying to animate across a huge gap.
-  static const double _maxBeaconCorrectionResetMeters = 8.0;
+  double get _maxBeaconCorrectionResetMeters =>
+      navigationConfig.maxBeaconCorrectionResetMeters;
 
   // ---------------------------------------------------------------------------
   // P1 RSSI SMOOTHING
@@ -200,39 +206,41 @@ class NavigationController extends ChangeNotifier {
   ///
   /// Lower = smoother but slower.
   /// Higher = more responsive but noisier.
-  static const double _rssiEmaAlpha = 0.30;
+  double get _rssiEmaAlpha => navigationConfig.rssiEmaAlpha;
 
   /// Rolling RSSI window used to infer whether the user is approaching
   /// or moving away from the next route beacon.
-  static const int _rssiTrendWindowSize = 4;
+  int get _rssiTrendWindowSize => navigationConfig.rssiTrendWindowSize;
 
   /// Minimum average RSSI delta required before trusting a trend.
-  static const double _rssiTrendThresholdDb = 4.0;
+  double get _rssiTrendThresholdDb => navigationConfig.rssiTrendThresholdDb;
 
   // ---------------------------------------------------------------------------
   // INITIAL FIX
   // ---------------------------------------------------------------------------
 
-  static const int _initialFixWindowSize = 10;
-  static const int _initialFixMinSamples = 8;
+  int get _initialFixWindowSize => navigationConfig.initialFixWindowSize;
+  int get _initialFixMinSamples => navigationConfig.initialFixMinSamples;
 
-  static const double _initialFixMinMarginDb = 8.0;
+  double get _initialFixMinMarginDb => navigationConfig.initialFixMinMarginDb;
 
-  static const Duration _initialFixMaxWait = Duration(seconds: 6);
+  Duration get _initialFixMaxWait => navigationConfig.initialFixMaxWait;
 
   /// A beacon this strong on its own means the user is almost certainly
   /// standing right next to it — the first fix can accept it immediately
   /// instead of waiting for [_initialFixMinSamples]/margin comparisons.
-  static const double _initialFixStrongRssiDb = -65.0;
+  double get _initialFixStrongRssiDb => navigationConfig.initialFixStrongRssiDb;
 
   /// Fewer samples are needed for the strong-signal fast path above,
   /// since it doesn't depend on comparing against a runner-up.
-  static const int _initialFixStrongMinSamples = 5;
+  int get _initialFixStrongMinSamples =>
+      navigationConfig.initialFixStrongMinSamples;
 
   /// Variance threshold for fast-path acceptance. A strong signal (>= -65 dB)
   /// must also have low variance (spread < 1.0 dB) to be accepted immediately.
   /// This filters erratic multipath signals that briefly spike but aren't stable.
-  static const double _initialFixStrongVarianceThresholdDb = 1.0;
+  double get _initialFixStrongVarianceThresholdDb =>
+      navigationConfig.initialFixStrongVarianceThresholdDb;
 
   /// A smaller margin is trustworthy once a candidate has held the lead
   /// for [_initialFixLeaderStreakForAccept] consecutive evaluations.
@@ -241,23 +249,29 @@ class NavigationController extends ChangeNotifier {
   /// to be confident the beacon difference is real, not multipath.
   /// Phase 11: Increased from 3.5 dB + 12 evals to prevent false positives during
   /// zone transitions (e.g., Breakout multipath spikes during Gemma→Interim path).
-  static const double _initialFixSustainedMarginDb = 4.0;
+  double get _initialFixSustainedMarginDb =>
+      navigationConfig.initialFixSustainedMarginDb;
 
-  static const int _initialFixLeaderStreakForAccept = 12;
+  int get _initialFixLeaderStreakForAccept =>
+      navigationConfig.initialFixLeaderStreakForAccept;
 
   /// Floor for the timeout trend-only fallback (no streak/strong-margin
   /// evidence) — without this it could flip on a margin as low as the RF
   /// noise floor (observed ~0.5dB) purely because a trend flag happened to
   /// be set.
-  static const double _initialFixTimeoutTrendMinMarginDb = 2.0;
+  double get _initialFixTimeoutTrendMinMarginDb =>
+      navigationConfig.initialFixTimeoutTrendMinMarginDb;
 
   // ---------------------------------------------------------------------------
   // SERVICES
   // ---------------------------------------------------------------------------
 
   final StoreMap storeMap;
-  final BleScannerService bleScanner;
+
   final MotionService motionService;
+  final BeaconObservationSource _observationSource;
+
+  Stream<String> get observationErrors => _observationSource.errors;
 
   /// Kept for API compatibility with the existing controller.
   final ZoneSnapService _zoneSnap;
@@ -265,7 +279,6 @@ class NavigationController extends ChangeNotifier {
   final PathfindingService _pathfinder;
 
   bool allowOffRouteBeacons;
-
 
   final ActivityLogger? logger;
 
@@ -359,13 +372,14 @@ class NavigationController extends ChangeNotifier {
     return false;
   }
 
-
   /// Check if the margin is sufficient given adjacency constraint.
   /// - Adjacent beacons (close together, e.g. SOC↔Interim): higher 9.0 dB margin to prevent flapping
   /// - Non-adjacent beacons (distant): standard 6.0 dB margin (can't realistically be equally strong)
-  bool _meetsGeoConstraintMargin(Beacon candidate, Beacon current, double marginDb) {
+  bool _meetsGeoConstraintMargin(
+      Beacon candidate, Beacon current, double marginDb) {
     final isAdjacent = _areAdjacentBeacons(candidate, current);
-    final requiredMargin = isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
+    final requiredMargin =
+        isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
     return marginDb >= requiredMargin;
   }
 
@@ -374,9 +388,6 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   final Map<String, double> _rssiEma = {};
-
-
-
 
   // ---------------------------------------------------------------------------
   // INITIAL FIX STATE
@@ -477,7 +488,7 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   void start() {
-    bleScanner.startScan();
+    _observationSource.startScan();
 
     motionService.start();
 
@@ -498,21 +509,20 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   void _updateRssiHistory(
-      String bleId,
-      double rssi,
-      ) {
+    String bleId,
+    double rssi,
+  ) {
     final previousEma = _rssiEma[bleId];
 
     final ema = previousEma == null
         ? rssi
-        : (_rssiEmaAlpha * rssi) +
-        ((1.0 - _rssiEmaAlpha) * previousEma);
+        : (_rssiEmaAlpha * rssi) + ((1.0 - _rssiEmaAlpha) * previousEma);
 
     _rssiEma[bleId] = ema;
 
     final history = _rssiHistory.putIfAbsent(
       bleId,
-          () => <double>[],
+      () => <double>[],
     );
 
     history.add(ema);
@@ -525,10 +535,10 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## RSSI UPDATE '
-          'bleId=$bleId '
-          'raw=${rssi.toStringAsFixed(1)} '
-          'ema=${ema.toStringAsFixed(1)} '
-          'samples=${history.length}',
+      'bleId=$bleId '
+      'raw=${rssi.toStringAsFixed(1)} '
+      'ema=${ema.toStringAsFixed(1)} '
+      'samples=${history.length}',
     );
   }
 
@@ -590,8 +600,8 @@ class NavigationController extends ChangeNotifier {
   // RSSI UPDATE
   // ---------------------------------------------------------------------------
   void _onRssiUpdate(
-      Map<String, double> rssiByBleId,
-      ) async {
+    Map<String, double> rssiByBleId,
+  ) async {
     _rssiUpdateCount++;
 
     final now = DateTime.now();
@@ -603,7 +613,6 @@ class NavigationController extends ChangeNotifier {
     // P1:
     // Smooth the raw RSSI before using it for decisions.
     _updateRssiEma(rssiByBleId);
-
 
     _updateCurrentBeaconState(rssiByBleId);
 
@@ -620,16 +629,14 @@ class NavigationController extends ChangeNotifier {
       rssiByBleId,
     );
 
-    _log(
-      'NAV### SELECTED CANDIDATE '
-          'current=${currentBeacon?.name ?? "null"} '
-          'candidate=${candidate?.name ?? "null"} '
-          'next=${currentBeacon != null ? _pathBeaconAfter(currentBeacon!.id)?.name ?? "none" : "none"}'
-    );
+    _log('NAV### SELECTED CANDIDATE '
+        'current=${currentBeacon?.name ?? "null"} '
+        'candidate=${candidate?.name ?? "null"} '
+        'next=${currentBeacon != null ? _pathBeaconAfter(currentBeacon!.id)?.name ?? "none" : "none"}');
 
     _log(
       'NAV## BEACONS candidate is '
-          '${candidate?.name}',
+      '${candidate?.name}',
     );
 
     // -----------------------------------------------------------------------
@@ -651,17 +658,16 @@ class NavigationController extends ChangeNotifier {
     if (destinationBeacon == null) {
       if (candidate == null) {
         _clearPendingBeaconCandidate();
-        
+
         // -----------------------------------------------------------------------
         // FREE-ROAM IDLE HEARTBEAT (no candidate available)
         // -----------------------------------------------------------------------
-        if (_rssiUpdateCount == 1 ||
-            _rssiUpdateCount % 30 == 0) {
+        if (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0) {
           _log(
             'NAV## free-roam IDLE (no candidate) '
-                'current=${currentBeacon?.name ?? "none"} '
-                '| ${rssiByBleId.length} beacons visible '
-                '| visibility=${rssiByBleId.keys.map((k) => storeMap.beaconByBleId(k)?.name ?? k).join(", ")}',
+            'current=${currentBeacon?.name ?? "none"} '
+            '| ${rssiByBleId.length} beacons visible '
+            '| visibility=${rssiByBleId.keys.map((k) => storeMap.beaconByBleId(k)?.name ?? k).join(", ")}',
           );
         }
         return;
@@ -672,17 +678,16 @@ class NavigationController extends ChangeNotifier {
       if (!changed) {
         // Already-selected beacon is still winning — nothing pending to clear.
         _clearPendingBeaconCandidate();
-        
+
         // -----------------------------------------------------------------------
         // FREE-ROAM IDLE HEARTBEAT (current beacon still winning)
         // -----------------------------------------------------------------------
-        if (_rssiUpdateCount == 1 ||
-            _rssiUpdateCount % 30 == 0) {
+        if (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0) {
           _log(
             'NAV## free-roam STABLE '
-                'current=${currentBeacon!.name} '
-                '| ${rssiByBleId.length} beacons visible '
-                '| top_contenders=${(rssiByBleId.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).take(3).map((e) => "${storeMap.beaconByBleId(e.key)?.name ?? e.key}:${e.value.toStringAsFixed(1)}dB").join(", ")}',
+            'current=${currentBeacon!.name} '
+            '| ${rssiByBleId.length} beacons visible '
+            '| top_contenders=${(rssiByBleId.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).take(3).map((e) => "${storeMap.beaconByBleId(e.key)?.name ?? e.key}:${e.value.toStringAsFixed(1)}dB").join(", ")}',
           );
         }
         return;
@@ -690,7 +695,7 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV## free-roam NEW CANDIDATE selected: ${candidate.name} '
-            '(was ${currentBeacon?.name ?? "none"})',
+        '(was ${currentBeacon?.name ?? "none"})',
       );
 
       // -----------------------------------------------------------------------
@@ -700,9 +705,9 @@ class NavigationController extends ChangeNotifier {
       // This prevents switching to a beacon that's significantly weaker.
       // Unlike navigation mode (2.0 dB margin), free-roam is more lenient
       // since there's no route constraint.
-      
+
       const double _freeRoamRssiMarginDb = 5.0;
-      
+
       if (currentBeacon != null) {
         final currentRssi = _smoothedRssi(currentBeacon!.id) ??
             _rssiForBeacon(currentBeacon, rssiByBleId);
@@ -710,16 +715,16 @@ class NavigationController extends ChangeNotifier {
             _rssiForBeacon(candidate, rssiByBleId);
 
         if (currentRssi != null && candidateRssi != null) {
-          final isCompetitive = candidateRssi >=
-              (currentRssi - _freeRoamRssiMarginDb);
+          final isCompetitive =
+              candidateRssi >= (currentRssi - _freeRoamRssiMarginDb);
 
           _log(
             'NAV## [1/4] RSSI check: ${candidate.name} vs ${currentBeacon!.name} '
-                'candidate=${candidateRssi.toStringAsFixed(1)}dBm '
-                'current=${currentRssi.toStringAsFixed(1)}dBm '
-                'margin=${(currentRssi - candidateRssi).toStringAsFixed(1)}dB '
-                'threshold=${_freeRoamRssiMarginDb}dB '
-                'result=${isCompetitive ? "✓ PASS" : "✗ FAIL"}',
+            'candidate=${candidateRssi.toStringAsFixed(1)}dBm '
+            'current=${currentRssi.toStringAsFixed(1)}dBm '
+            'margin=${(currentRssi - candidateRssi).toStringAsFixed(1)}dB '
+            'threshold=${_freeRoamRssiMarginDb}dB '
+            'result=${isCompetitive ? "✓ PASS" : "✗ FAIL"}',
           );
 
           if (!isCompetitive) {
@@ -737,13 +742,14 @@ class NavigationController extends ChangeNotifier {
           // Margin = candidate RSSI - current RSSI (positive when candidate is stronger)
           final marginDb = candidateRssi - currentRssi;
           final isAdjacent = _areAdjacentBeacons(candidate, currentBeacon!);
-          final requiredMargin = isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
+          final requiredMargin =
+              isAdjacent ? _distantBeaconMarginDb : _beaconSwitchThresholdDb;
 
           if (!_meetsGeoConstraintMargin(candidate, currentBeacon!, marginDb)) {
             _log(
               'NAV## [1.5/4] GEO-CONSTRAINT: ${candidate.name} REJECTED '
-                  'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
-                  '${isAdjacent ? "(adjacent: need 8dB to prevent flapping)" : "(non-adjacent: 6dB OK)"}',
+              'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
+              '${isAdjacent ? "(adjacent: need 8dB to prevent flapping)" : "(non-adjacent: 6dB OK)"}',
             );
             _clearPendingBeaconCandidate();
             return;
@@ -751,8 +757,8 @@ class NavigationController extends ChangeNotifier {
 
           _log(
             'NAV## [1.5/4] GEO-CONSTRAINT: ${candidate.name} OK '
-                'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
-                '${isAdjacent ? "(adjacent: 9dB required)" : "(non-adjacent: 6dB OK)"}',
+            'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
+            '${isAdjacent ? "(adjacent: 9dB required)" : "(non-adjacent: 6dB OK)"}',
           );
         }
       }
@@ -763,9 +769,8 @@ class NavigationController extends ChangeNotifier {
       // Same safety gates as navigation mode: persistence time + cooldown.
       // - persistence: 300ms (looser than navigation's 800ms)
       // - cooldown: 600ms (same as navigation)
-      
-      const Duration _freeRoamPersistence =
-          Duration(milliseconds: 300);
+
+      final freeRoamPersistence = navigationConfig.freeRoamPersistence;
 
       // Require the new candidate to win several consecutive evaluations
       // before replacing the current beacon.
@@ -778,7 +783,7 @@ class NavigationController extends ChangeNotifier {
 
         _log(
           'NAV## [2/4] Read count: NEW candidate ${candidate.name} '
-              'starting persistence timer',
+          'starting persistence timer',
         );
       }
 
@@ -787,26 +792,27 @@ class NavigationController extends ChangeNotifier {
           : now.difference(_pendingBeaconSince!);
 
       final inCooldown = _lastBeaconSwitchAt != null &&
-          now.difference(_lastBeaconSwitchAt!) <
-              _beaconSwitchCooldown;
+          now.difference(_lastBeaconSwitchAt!) < _beaconSwitchCooldown;
 
       // Not yet confirmed: either read count or time persistence not met.
       if (_pendingBeaconCount < _freeRoamSwitchConfirmReadings ||
-          candidateAge < _freeRoamPersistence ||
+          candidateAge < freeRoamPersistence ||
           inCooldown) {
-        final readCountOk = _pendingBeaconCount >= _freeRoamSwitchConfirmReadings;
-        final ageOk = candidateAge >= _freeRoamPersistence;
+        final readCountOk =
+            _pendingBeaconCount >= _freeRoamSwitchConfirmReadings;
+        final ageOk = candidateAge >= freeRoamPersistence;
         final cooldownOk = !inCooldown;
 
-        if (_pendingBeaconCount % 2 == 0 || candidateAge.inMilliseconds >= 250) {
+        if (_pendingBeaconCount % 2 == 0 ||
+            candidateAge.inMilliseconds >= 250) {
           _log(
             'NAV## [2-3/4] Confirmation gates: ${candidate.name} '
-                'reads: ${_pendingBeaconCount}/$_freeRoamSwitchConfirmReadings '
-                '${readCountOk ? "✓" : "✗"} | '
-                'age: ${candidateAge.inMilliseconds}ms/'
-                '${_freeRoamPersistence.inMilliseconds}ms '
-                '${ageOk ? "✓" : "✗"} | '
-                'cooldown: ${inCooldown ? "✗ IN_COOLDOWN" : "✓ OK"}',
+            'reads: ${_pendingBeaconCount}/$_freeRoamSwitchConfirmReadings '
+            '${readCountOk ? "✓" : "✗"} | '
+            'age: ${candidateAge.inMilliseconds}ms/'
+            '${freeRoamPersistence.inMilliseconds}ms '
+            '${ageOk ? "✓" : "✗"} | '
+            'cooldown: ${inCooldown ? "✗ IN_COOLDOWN" : "✓ OK"}',
           );
         }
         return;
@@ -814,8 +820,8 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV## [4/4] ALL GATES PASSED: ${candidate.name} '
-            'reads=$_pendingBeaconCount age=${candidateAge.inMilliseconds}ms '
-            'cooldown=OK → READY TO COMMIT',
+        'reads=$_pendingBeaconCount age=${candidateAge.inMilliseconds}ms '
+        'cooldown=OK → READY TO COMMIT',
       );
 
       // -----------------------------------------------------------------------
@@ -840,8 +846,8 @@ class NavigationController extends ChangeNotifier {
 
       _clearPendingBeaconCandidate();
 
-      final candidateRssi = _smoothedRssi(candidate.id) ??
-          _rssiForBeacon(candidate, rssiByBleId);
+      final candidateRssi =
+          _smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId);
       final previousRssi = previousBeacon != null
           ? (_smoothedRssi(previousBeacon.id) ??
               _rssiForBeacon(previousBeacon, rssiByBleId))
@@ -849,10 +855,10 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV## ✓✓✓ FREE-ROAM BEACON COMMITTED '
-            '${previousBeacon?.name ?? "none"} → ${candidate.name} '
-            'prevRSSI=${previousRssi?.toStringAsFixed(1) ?? "—"}dBm '
-            'newRSSI=${candidateRssi?.toStringAsFixed(1) ?? "—"}dBm | '
-            'confirmed after ${_pendingBeaconCount} reads / ${candidateAge.inMilliseconds}ms',
+        '${previousBeacon?.name ?? "none"} → ${candidate.name} '
+        'prevRSSI=${previousRssi?.toStringAsFixed(1) ?? "—"}dBm '
+        'newRSSI=${candidateRssi?.toStringAsFixed(1) ?? "—"}dBm | '
+        'confirmed after ${_pendingBeaconCount} reads / ${candidateAge.inMilliseconds}ms',
       );
 
       notifyListeners();
@@ -876,53 +882,51 @@ class NavigationController extends ChangeNotifier {
     // HEARTBEAT LOG
     // -----------------------------------------------------------------------
 
-    if (_rssiUpdateCount == 1 ||
-        _rssiUpdateCount % 30 == 0) {
+    if (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0) {
       final currentRaw = _rssiForBeacon(
         currentBeacon,
         rssiByBleId,
       );
 
-      final currentSmooth =
-      currentBeacon == null
+      final currentSmooth = currentBeacon == null
           ? null
           : _smoothedRssi(
-        currentBeacon!.id,
-      );
+              currentBeacon!.id,
+            );
 
       final candidateRaw = candidate == null
           ? null
           : _rssiForBeacon(
-        candidate,
-        rssiByBleId,
-      );
+              candidate,
+              rssiByBleId,
+            );
 
       final candidateSmooth = candidate == null
           ? null
           : _smoothedRssi(
-        candidate.id,
-      );
+              candidate.id,
+            );
 
       _log(
         'NAV: RSSI #$_rssiUpdateCount — '
-            '${rssiByBleId.length} beacons visible'
-            ' | beacon=${currentBeacon?.name ?? "none"}'
-            ' | currentRaw='
-            '${currentRaw?.toStringAsFixed(1) ?? "none"}'
-            ' | currentEMA='
-            '${currentSmooth?.toStringAsFixed(1) ?? "none"}'
-            ' | candidate=${candidate?.name ?? "none"}'
-            ' | candidateRaw='
-            '${candidateRaw?.toStringAsFixed(1) ?? "none"}'
-            ' | candidateEMA='
-            '${candidateSmooth?.toStringAsFixed(1) ?? "none"}'
-            ' | trend=$_nextBeaconTrend'
-            ' | dest=${destinationBeacon?.name ?? "none"}'
-            ' | path=${currentPath.length} nodes'
-            ' | metersSinceBeacon='
-            '${_metersSinceBeacon.toStringAsFixed(1)}'
-            ' | livePos='
-            '${liveUserPosition != null ? "set" : "null"}',
+        '${rssiByBleId.length} beacons visible'
+        ' | beacon=${currentBeacon?.name ?? "none"}'
+        ' | currentRaw='
+        '${currentRaw?.toStringAsFixed(1) ?? "none"}'
+        ' | currentEMA='
+        '${currentSmooth?.toStringAsFixed(1) ?? "none"}'
+        ' | candidate=${candidate?.name ?? "none"}'
+        ' | candidateRaw='
+        '${candidateRaw?.toStringAsFixed(1) ?? "none"}'
+        ' | candidateEMA='
+        '${candidateSmooth?.toStringAsFixed(1) ?? "none"}'
+        ' | trend=$_nextBeaconTrend'
+        ' | dest=${destinationBeacon?.name ?? "none"}'
+        ' | path=${currentPath.length} nodes'
+        ' | metersSinceBeacon='
+        '${_metersSinceBeacon.toStringAsFixed(1)}'
+        ' | livePos='
+        '${liveUserPosition != null ? "set" : "null"}',
       );
     }
 
@@ -931,14 +935,12 @@ class NavigationController extends ChangeNotifier {
     // -----------------------------------------------------------------------
 
     final arrived =
-        currentBeacon != null &&
-            currentBeacon?.id == destinationBeacon?.id;
+        currentBeacon != null && currentBeacon?.id == destinationBeacon?.id;
 
     if (arrived) {
       // Once destination is reached, don't let a neighbouring beacon
       // pull the navigation state away from the destination.
-      if (candidate != null &&
-          candidate.id != currentBeacon?.id) {
+      if (candidate != null && candidate.id != currentBeacon?.id) {
         return;
       }
 
@@ -986,12 +988,11 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## SWITCH ATTEMPT '
-          '${currentBeacon?.name ?? "none"} → ${candidate.name} '
-          'meters=${_metersSinceBeacon.toStringAsFixed(2)} '
-          'trend=$_nextBeaconTrend '
-          'candidateRSSI='
-          '${(_smoothedRssi(candidate.id) ??
-          _rssiForBeacon(candidate, rssiByBleId))}'
+      '${currentBeacon?.name ?? "none"} → ${candidate.name} '
+      'meters=${_metersSinceBeacon.toStringAsFixed(2)} '
+      'trend=$_nextBeaconTrend '
+      'candidateRSSI='
+      '${(_smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId))}'
       '?.toStringAsFixed(1) ?? "none"}',
     );
 
@@ -1030,7 +1031,7 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV### SWITCH VALIDATION PASSED '
-          '${currentBeacon?.name ?? "none"} → ${candidate.name}',
+      '${currentBeacon?.name ?? "none"} → ${candidate.name}',
     );
 
     // -----------------------------------------------------------------------
@@ -1058,15 +1059,15 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV## candidate ${candidate.name} '
-            'vs ${currentBeacon?.name ?? "none"} '
-            'current='
-            '${currentRaw?.toStringAsFixed(1) ?? "none"}dBm '
-            'candidate='
-            '${candidateRaw?.toStringAsFixed(1) ?? "none"}dBm '
-            'EMA='
-            '${_smoothedRssi(candidate.id)?.toStringAsFixed(1) ?? "none"} '
-            'trend=$_nextBeaconTrend '
-            '— persistence started',
+        'vs ${currentBeacon?.name ?? "none"} '
+        'current='
+        '${currentRaw?.toStringAsFixed(1) ?? "none"}dBm '
+        'candidate='
+        '${candidateRaw?.toStringAsFixed(1) ?? "none"}dBm '
+        'EMA='
+        '${_smoothedRssi(candidate.id)?.toStringAsFixed(1) ?? "none"} '
+        'trend=$_nextBeaconTrend '
+        '— persistence started',
       );
     }
 
@@ -1081,58 +1082,51 @@ class NavigationController extends ChangeNotifier {
     final candidateAge = _pendingBeaconSince == null
         ? Duration.zero
         : now.difference(
-      _pendingBeaconSince!,
-    );
+            _pendingBeaconSince!,
+          );
 
     _log(
       'NAV### SWITCH VALIDATED STATE '
-          '${currentBeacon?.name ?? "none"} → ${candidate.name} '
-          'pending=$_pendingBeaconId '
-          'count=$_pendingBeaconCount/$_requiredConsecutiveReadings '
-          'age=${candidateAge.inMilliseconds}ms',
+      '${currentBeacon?.name ?? "none"} → ${candidate.name} '
+      'pending=$_pendingBeaconId '
+      'count=$_pendingBeaconCount/$_requiredConsecutiveReadings '
+      'age=${candidateAge.inMilliseconds}ms',
     );
 
     // -----------------------------------------------------------------------
     // COOLDOWN
     // -----------------------------------------------------------------------
 
-    final inCooldown =
-        _lastBeaconSwitchAt != null &&
-            now.difference(
+    final inCooldown = _lastBeaconSwitchAt != null &&
+        now.difference(
               _lastBeaconSwitchAt!,
             ) <
-                _beaconSwitchCooldown;
+            _beaconSwitchCooldown;
 
     // -----------------------------------------------------------------------
     // CONFIRM BEACON
     // -----------------------------------------------------------------------
 
-    if (_pendingBeaconCount >=
-        _requiredConsecutiveReadings &&
+    if (_pendingBeaconCount >= _requiredConsecutiveReadings &&
         candidateAge >= _candidatePersistence &&
         !inCooldown) {
-
       _log(
         'NAV### COMMIT CHECK '
-            '${currentBeacon?.name ?? "none"} → ${candidate.name} '
-            'count=$_pendingBeaconCount/'
-            '$_requiredConsecutiveReadings '
-            'age=${candidateAge.inMilliseconds}ms/'
-            '${_candidatePersistence.inMilliseconds}ms '
-            'cooldown=$inCooldown '
-            'pending=$_pendingBeaconId',
+        '${currentBeacon?.name ?? "none"} → ${candidate.name} '
+        'count=$_pendingBeaconCount/'
+        '$_requiredConsecutiveReadings '
+        'age=${candidateAge.inMilliseconds}ms/'
+        '${_candidatePersistence.inMilliseconds}ms '
+        'cooldown=$inCooldown '
+        'pending=$_pendingBeaconId',
       );
 
-
-      final prevPath =
-      List<Beacon>.from(currentPath);
+      final prevPath = List<Beacon>.from(currentPath);
 
       final previousBeacon = currentBeacon;
 
       final committedPendingCount = _pendingBeaconCount;
       final committedPendingAge = candidateAge;
-
-
 
       // ---------------------------------------------------------------------
       // FINAL ANTI-TELEPORT GUARD
@@ -1148,17 +1142,15 @@ class NavigationController extends ChangeNotifier {
         previousBeacon,
         candidate,
       )) {
-
         _clearPendingBeaconCandidate();
         _log(
           'NAV## TELEPORT BLOCKED at confirmation: '
-              '${previousBeacon?.name ?? "none"} '
-              '→ ${candidate.name}',
+          '${previousBeacon?.name ?? "none"} '
+          '→ ${candidate.name}',
         );
 
         return;
       }
-
 
       _clearPendingBeaconCandidate();
       // ---------------------------------------------------------------------
@@ -1166,18 +1158,17 @@ class NavigationController extends ChangeNotifier {
       // ---------------------------------------------------------------------
 
       // A beacon behind the user must never become the new anchor.
-      final alreadyPassed =
-          liveUserPosition != null &&
-              _isAlreadyPassed(
-                candidate,
-                prevPath,
-                liveUserPosition!,
-              );
+      final alreadyPassed = liveUserPosition != null &&
+          _isAlreadyPassed(
+            candidate,
+            prevPath,
+            liveUserPosition!,
+          );
 
       if (alreadyPassed) {
         _log(
           'NAV## beacon ${candidate.name} '
-              'confirmed — ignored because already passed',
+          'confirmed — ignored because already passed',
         );
 
         return;
@@ -1216,11 +1207,11 @@ class NavigationController extends ChangeNotifier {
       // ---------------------------------------------------------------------
       _log(
         'NAV### COMMIT BEACON '
-            '${previousBeacon?.name ?? "none"} → ${candidate.name} '
-            'count=$committedPendingCount/'
-            '$_requiredConsecutiveReadings '
-            'age=${committedPendingAge.inMilliseconds}ms '
-            'cooldown=$inCooldown',
+        '${previousBeacon?.name ?? "none"} → ${candidate.name} '
+        'count=$committedPendingCount/'
+        '$_requiredConsecutiveReadings '
+        'age=${committedPendingAge.inMilliseconds}ms '
+        'cooldown=$inCooldown',
       );
 
       currentBeacon = candidate;
@@ -1255,8 +1246,7 @@ class NavigationController extends ChangeNotifier {
 
       _snapToCurrentBeacon();
 
-      status =
-      candidate.id == destinationBeacon?.id
+      status = candidate.id == destinationBeacon?.id
           ? NavigationStatus.arrived
           : NavigationStatus.navigating;
 
@@ -1282,7 +1272,7 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV## beacon confirmed → '
-            '${candidate.name}',
+        '${candidate.name}',
       );
 
       notifyListeners();
@@ -1294,20 +1284,18 @@ class NavigationController extends ChangeNotifier {
     // PERSISTENCE DEBUG
     // -----------------------------------------------------------------------
 
-    if (_pendingBeaconCount >=
-        _requiredConsecutiveReadings &&
-        (_rssiUpdateCount == 1 ||
-            _rssiUpdateCount % 30 == 0)) {
+    if (_pendingBeaconCount >= _requiredConsecutiveReadings &&
+        (_rssiUpdateCount == 1 || _rssiUpdateCount % 30 == 0)) {
       _log(
         'NAV## candidate ${candidate.name} '
-            'held ${candidateAge.inMilliseconds}ms '
-            'count=$_pendingBeaconCount/'
-            '$_requiredConsecutiveReadings '
-            'cooldown=$inCooldown '
-            'trend=$_nextBeaconTrend',
+        'held ${candidateAge.inMilliseconds}ms '
+        'count=$_pendingBeaconCount/'
+        '$_requiredConsecutiveReadings '
+        'cooldown=$inCooldown '
+        'trend=$_nextBeaconTrend',
       );
     }
-    }
+  }
 //   void _onRssiUpdate(
 //     Map<String, double> rssiByBleId,
 //   ) {
@@ -1703,8 +1691,8 @@ class NavigationController extends ChangeNotifier {
   // P1 RSSI EMA
   // ---------------------------------------------------------------------------
   void _updateRssiEma(
-      Map<String, double> rssiByBleId,
-      ) {
+    Map<String, double> rssiByBleId,
+  ) {
     // Track latest raw RSSI for ML inference
     _lastRssiByBeaconId = rssiByBleId;
 
@@ -1716,15 +1704,14 @@ class NavigationController extends ChangeNotifier {
       if (previous == null) {
         ema = entry.value;
       } else {
-        ema =
-            previous + _rssiEmaAlpha * (entry.value - previous);
+        ema = previous + _rssiEmaAlpha * (entry.value - previous);
       }
 
       _rssiEma[entry.key] = ema;
 
       final history = _rssiHistory.putIfAbsent(
         entry.key,
-            () => <double>[],
+        () => <double>[],
       );
 
       history.add(ema);
@@ -1736,8 +1723,6 @@ class NavigationController extends ChangeNotifier {
       }
     }
   }
-
-
 
   double? _smoothedRssi(
     String beaconId,
@@ -1764,8 +1749,8 @@ class NavigationController extends ChangeNotifier {
   // CANDIDATE SELECTION
   // ---------------------------------------------------------------------------
   Beacon? _selectBeaconCandidate(
-      Map<String, double> rssiByBleId,
-      ) {
+    Map<String, double> rssiByBleId,
+  ) {
     // -----------------------------------------------------------------------
     // FREE / INITIAL POSITIONING
     // -----------------------------------------------------------------------
@@ -1801,14 +1786,14 @@ class NavigationController extends ChangeNotifier {
     final current = currentBeacon!;
 
     final currentIndex = currentPath.indexWhere(
-          (b) => b.id == current.id,
+      (b) => b.id == current.id,
     );
 
     if (currentIndex < 0) {
       _log(
         'NAV## CANDIDATE CURRENT NOT FOUND IN PATH '
-            'current=${current.name} '
-            'currentId=${current.id}',
+        'current=${current.name} '
+        'currentId=${current.id}',
       );
       return null;
     }
@@ -1822,8 +1807,8 @@ class NavigationController extends ChangeNotifier {
     if (primary == null) {
       _log(
         'NAV## NO NEXT BEACON '
-            'current=${current.name} '
-            'destination=${destinationBeacon?.name ?? "null"}',
+        'current=${current.name} '
+        'destination=${destinationBeacon?.name ?? "null"}',
       );
       return null;
     }
@@ -1835,11 +1820,10 @@ class NavigationController extends ChangeNotifier {
     Beacon? secondary;
 
     final primaryIndex = currentPath.indexWhere(
-          (b) => b.id == primary.id,
+      (b) => b.id == primary.id,
     );
 
-    if (primaryIndex >= 0 &&
-        primaryIndex + 1 < currentPath.length) {
+    if (primaryIndex >= 0 && primaryIndex + 1 < currentPath.length) {
       secondary = currentPath[primaryIndex + 1];
     }
 
@@ -1848,30 +1832,27 @@ class NavigationController extends ChangeNotifier {
     // -----------------------------------------------------------------------
 
     if (_primaryCandidateState?.beacon.id != primary.id) {
-      _primaryCandidateState =
-          _BeaconCandidateState(primary);
+      _primaryCandidateState = _BeaconCandidateState(primary);
     }
 
     if (secondary == null) {
       _secondaryCandidateState = null;
     } else if (_secondaryCandidateState?.beacon.id != secondary.id) {
-      _secondaryCandidateState =
-          _BeaconCandidateState(secondary);
+      _secondaryCandidateState = _BeaconCandidateState(secondary);
     }
 
     // -----------------------------------------------------------------------
     // RSSI
     // -----------------------------------------------------------------------
 
-    final primaryRssi =
-    _rssiForBeacon(primary, rssiByBleId);
+    final primaryRssi = _rssiForBeacon(primary, rssiByBleId);
 
     final secondaryRssi = secondary == null
         ? null
         : _rssiForBeacon(
-      secondary,
-      rssiByBleId,
-    );
+            secondary,
+            rssiByBleId,
+          );
 
     // -----------------------------------------------------------------------
     // KEEP AN ALREADY-PENDING CANDIDATE STABLE
@@ -1896,27 +1877,24 @@ class NavigationController extends ChangeNotifier {
     // It only becomes locked once it is already pending.
     // -----------------------------------------------------------------------
 
-    if (_pendingBeaconId != null &&
-        _pendingBeaconCount > 0) {
-
+    if (_pendingBeaconId != null && _pendingBeaconCount > 0) {
       if (_pendingBeaconId == primary.id) {
         _log(
           'NAV### KEEP PENDING PRIMARY '
-              '${current.name} → ${primary.name} '
-              'pending=$_pendingBeaconId '
-              'count=$_pendingBeaconCount',
+          '${current.name} → ${primary.name} '
+          'pending=$_pendingBeaconId '
+          'count=$_pendingBeaconCount',
         );
 
         return primary;
       }
 
-      if (secondary != null &&
-          _pendingBeaconId == secondary.id) {
+      if (secondary != null && _pendingBeaconId == secondary.id) {
         _log(
           'NAV### KEEP PENDING SECONDARY '
-              '${current.name} → ${secondary.name} '
-              'pending=$_pendingBeaconId '
-              'count=$_pendingBeaconCount',
+          '${current.name} → ${secondary.name} '
+          'pending=$_pendingBeaconId '
+          'count=$_pendingBeaconCount',
         );
 
         return secondary;
@@ -1942,43 +1920,39 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV### LOOKAHEAD DECISION '
-          'current=${current.name} '
-          'primary=${primary.name} '
-          'secondary=${secondary?.name ?? "none"} '
-          'primaryRSSI=${primaryRssi?.toStringAsFixed(1) ?? "none"} '
-          'secondaryRSSI=${secondaryRssi?.toStringAsFixed(1) ?? "none"} '
-          'primaryPassed=$primaryPassed',
+      'current=${current.name} '
+      'primary=${primary.name} '
+      'secondary=${secondary?.name ?? "none"} '
+      'primaryRSSI=${primaryRssi?.toStringAsFixed(1) ?? "none"} '
+      'secondaryRSSI=${secondaryRssi?.toStringAsFixed(1) ?? "none"} '
+      'primaryPassed=$primaryPassed',
     );
 
     if (_enableRouteLookAhead &&
         secondary != null &&
         primaryRssi != null &&
         secondaryRssi != null) {
-
-      final secondaryLeadDb =
-          secondaryRssi - primaryRssi;
+      final secondaryLeadDb = secondaryRssi - primaryRssi;
 
       _log(
         'NAV### LOOKAHEAD CHECK '
-            'current=${current.name} '
-            'primary=${primary.name} '
-            'secondary=${secondary.name} '
-            'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
-            'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
-            'secondaryLead=${secondaryLeadDb.toStringAsFixed(1)}dB '
-            'primaryPassed=$primaryPassed',
+        'current=${current.name} '
+        'primary=${primary.name} '
+        'secondary=${secondary.name} '
+        'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
+        'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+        'secondaryLead=${secondaryLeadDb.toStringAsFixed(1)}dB '
+        'primaryPassed=$primaryPassed',
       );
 
-      if (primaryPassed &&
-          secondaryLeadDb >= _lookAheadSecondaryLeadDb) {
-
+      if (primaryPassed && secondaryLeadDb >= _lookAheadSecondaryLeadDb) {
         _log(
           'NAV### LOOKAHEAD ACCEPTED '
-              '${current.name} → ${secondary.name} '
-              'primary=${primary.name} '
-              'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
-              'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
-              'lead=${secondaryLeadDb.toStringAsFixed(1)}dB',
+          '${current.name} → ${secondary.name} '
+          'primary=${primary.name} '
+          'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
+          'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+          'lead=${secondaryLeadDb.toStringAsFixed(1)}dB',
         );
 
         return secondary;
@@ -1992,11 +1966,11 @@ class NavigationController extends ChangeNotifier {
     if (primaryRssi != null) {
       _log(
         'NAV## CANDIDATE PRIMARY '
-            '${current.name} → ${primary.name} '
-            'rssi=${primaryRssi.toStringAsFixed(1)} '
-            'secondary=${secondary?.name ?? "none"} '
-            'secondaryRSSI='
-            '${secondaryRssi?.toStringAsFixed(1) ?? "none"}',
+        '${current.name} → ${primary.name} '
+        'rssi=${primaryRssi.toStringAsFixed(1)} '
+        'secondary=${secondary?.name ?? "none"} '
+        'secondaryRSSI='
+        '${secondaryRssi?.toStringAsFixed(1) ?? "none"}',
       );
 
       return primary;
@@ -2153,7 +2127,6 @@ class NavigationController extends ChangeNotifier {
   // INITIAL FIX
   // ---------------------------------------------------------------------------
 
-
   bool _isValidNavigationHop(Beacon candidate) {
     final current = currentBeacon;
 
@@ -2231,9 +2204,9 @@ class NavigationController extends ChangeNotifier {
   }
 
   Beacon? _selectInitialFixCandidate(
-      Map<String, double> rssiByBleId,
-      Set<String>? eligibleBeaconIds,
-      ) {
+    Map<String, double> rssiByBleId,
+    Set<String>? eligibleBeaconIds,
+  ) {
     _initialFixStartedAt ??= DateTime.now();
 
     // ------------------------------------------------------------
@@ -2247,14 +2220,13 @@ class NavigationController extends ChangeNotifier {
         continue;
       }
 
-      if (eligibleBeaconIds != null &&
-          !eligibleBeaconIds.contains(beacon.id)) {
+      if (eligibleBeaconIds != null && !eligibleBeaconIds.contains(beacon.id)) {
         continue;
       }
 
       final window = _initialFixRssiWindows.putIfAbsent(
         beacon.id,
-            () => [],
+        () => [],
       );
 
       final value = _smoothedRssi(beacon.id) ?? entry.value;
@@ -2275,8 +2247,7 @@ class NavigationController extends ChangeNotifier {
     // ------------------------------------------------------------
 
     for (final entry in _initialFixRssiWindows.entries) {
-      if (eligibleBeaconIds != null &&
-          !eligibleBeaconIds.contains(entry.key)) {
+      if (eligibleBeaconIds != null && !eligibleBeaconIds.contains(entry.key)) {
         continue;
       }
 
@@ -2297,10 +2268,10 @@ class NavigationController extends ChangeNotifier {
           // Signal is strong AND stable → accept immediately
           _log(
             'NAV## initial fix FAST ACCEPT (stable) — '
-                '${beacon?.name ?? entry.key} '
-                'avg=${avg.toStringAsFixed(1)}dB '
-                'variance=${variance.toStringAsFixed(2)}dB ✓ '
-                '(both strong and stable)',
+            '${beacon?.name ?? entry.key} '
+            'avg=${avg.toStringAsFixed(1)}dB '
+            'variance=${variance.toStringAsFixed(2)}dB ✓ '
+            '(both strong and stable)',
           );
 
           return beacon;
@@ -2309,10 +2280,10 @@ class NavigationController extends ChangeNotifier {
           // Let other gates (margin, trend, timeout) make the call
           _log(
             'NAV## initial fix DEFER (erratic) — '
-                '${beacon?.name ?? entry.key} '
-                'avg=${avg.toStringAsFixed(1)}dB '
-                'variance=${variance.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB) ⚠️ '
-                '(strong but unstable signal, waiting for confirmation)',
+            '${beacon?.name ?? entry.key} '
+            'avg=${avg.toStringAsFixed(1)}dB '
+            'variance=${variance.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB) ⚠️ '
+            '(strong but unstable signal, waiting for confirmation)',
           );
         }
       }
@@ -2325,7 +2296,7 @@ class NavigationController extends ChangeNotifier {
     final averages = <String, double>{};
 
     _initialFixRssiWindows.forEach(
-          (beaconId, samples) {
+      (beaconId, samples) {
         if (eligibleBeaconIds != null &&
             !eligibleBeaconIds.contains(beaconId)) {
           return;
@@ -2369,11 +2340,11 @@ class NavigationController extends ChangeNotifier {
 
     final ranked = averages.entries.toList()
       ..sort(
-            (a, b) {
-          final aScore = a.value +
-              (a.key == lockedId ? currentBeaconStickinessDb : 0);
-          final bScore = b.value +
-              (b.key == lockedId ? currentBeaconStickinessDb : 0);
+        (a, b) {
+          final aScore =
+              a.value + (a.key == lockedId ? currentBeaconStickinessDb : 0);
+          final bScore =
+              b.value + (b.key == lockedId ? currentBeaconStickinessDb : 0);
 
           return bScore.compareTo(aScore);
         },
@@ -2381,7 +2352,6 @@ class NavigationController extends ChangeNotifier {
 
     final bestId = ranked.first.key;
     final bestAvg = ranked.first.value;
-
 
     //TODO Balwinder
     // final bestSamples = _initialFixRssiWindows[bestId];
@@ -2434,8 +2404,8 @@ class NavigationController extends ChangeNotifier {
       if (elapsed >= _initialFixMaxWait) {
         _log(
           'NAV## initial fix — single candidate '
-              '${storeMap.beaconById(bestId)?.name ?? bestId} '
-              'avg=${bestAvg.toStringAsFixed(1)}dB',
+          '${storeMap.beaconById(bestId)?.name ?? bestId} '
+          'avg=${bestAvg.toStringAsFixed(1)}dB',
         );
 
         return storeMap.beaconById(bestId);
@@ -2483,11 +2453,9 @@ class NavigationController extends ChangeNotifier {
     final bestTrend = _getInitialFixTrend(bestId);
     final secondTrend = _getInitialFixTrend(secondId);
 
-    final bestName =
-        storeMap.beaconById(bestId)?.name ?? bestId;
+    final bestName = storeMap.beaconById(bestId)?.name ?? bestId;
 
-    final secondName =
-        storeMap.beaconById(secondId)?.name ?? secondId;
+    final secondName = storeMap.beaconById(secondId)?.name ?? secondId;
 
     // ------------------------------------------------------------
     // 7. Strong margin = enough evidence by itself
@@ -2496,10 +2464,10 @@ class NavigationController extends ChangeNotifier {
     if (margin >= _initialFixMinMarginDb) {
       _log(
         'NAV## initial fix ACCEPTED — '
-            '$bestName avg=${bestAvg.toStringAsFixed(1)}dB '
-            'vs $secondName avg=${secondAvg.toStringAsFixed(1)}dB '
-            'margin=${margin.toStringAsFixed(1)}dB '
-            'trend=$bestTrend/$secondTrend',
+        '$bestName avg=${bestAvg.toStringAsFixed(1)}dB '
+        'vs $secondName avg=${secondAvg.toStringAsFixed(1)}dB '
+        'margin=${margin.toStringAsFixed(1)}dB '
+        'trend=$bestTrend/$secondTrend',
       );
 
       _isInitialFixComplete = true;
@@ -2530,19 +2498,18 @@ class NavigationController extends ChangeNotifier {
           !_isPhysicallyReachable(bestBeacon, rssiByBleId)) {
         _log(
           'NAV## initial fix — $bestName streak=$bestStreak '
-              'but physically unreachable (metersSinceBeacon='
-              '${_metersSinceBeacon.toStringAsFixed(1)}m) → waiting',
+          'but physically unreachable (metersSinceBeacon='
+          '${_metersSinceBeacon.toStringAsFixed(1)}m) → waiting',
         );
         return null;
       }
 
-
       _log(
         'NAV## initial fix ACCEPTED — '
-            '$bestName sustained lead for $bestStreak evaluations '
-            '(margin=${margin.toStringAsFixed(1)}dB '
-            'vs $secondName) '
-            'reachabilityChecked=${_metersSinceBeacon > 0}',
+        '$bestName sustained lead for $bestStreak evaluations '
+        '(margin=${margin.toStringAsFixed(1)}dB '
+        'vs $secondName) '
+        'reachabilityChecked=${_metersSinceBeacon > 0}',
       );
 
       _isInitialFixComplete = true;
@@ -2556,11 +2523,9 @@ class NavigationController extends ChangeNotifier {
     // while the competing beacon is weakening.
     // ------------------------------------------------------------
 
-    final candidateStrengthening =
-        bestTrend == _InitialFixTrend.strengthening;
+    final candidateStrengthening = bestTrend == _InitialFixTrend.strengthening;
 
-    final competitorWeakening =
-        secondTrend == _InitialFixTrend.weakening;
+    final competitorWeakening = secondTrend == _InitialFixTrend.weakening;
 
     if (candidateStrengthening && competitorWeakening) {
       // Trend alone is not enough at small margins (< 2.0 dB is likely RF noise).
@@ -2580,10 +2545,10 @@ class NavigationController extends ChangeNotifier {
             // Trend is real AND signal is stable → accept
             _log(
               'NAV## initial fix ACCEPTED (trend + stable) — '
-                  '$bestName strengthening '
-                  'while $secondName weakening '
-                  '(margin=${margin.toStringAsFixed(1)}dB, '
-                  'variance=${bestVariability.toStringAsFixed(2)}dB) ✓',
+              '$bestName strengthening '
+              'while $secondName weakening '
+              '(margin=${margin.toStringAsFixed(1)}dB, '
+              'variance=${bestVariability.toStringAsFixed(2)}dB) ✓',
             );
 
             _isInitialFixComplete = true;
@@ -2592,10 +2557,10 @@ class NavigationController extends ChangeNotifier {
             // Trend detected but signal is erratic → defer
             _log(
               'NAV## initial fix DEFER (trend but erratic) — '
-                  '$bestName strengthening '
-                  'while $secondName weakening '
-                  '(margin=${margin.toStringAsFixed(1)}dB, '
-                  'variance=${bestVariability.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB)) ⚠️',
+              '$bestName strengthening '
+              'while $secondName weakening '
+              '(margin=${margin.toStringAsFixed(1)}dB, '
+              'variance=${bestVariability.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB)) ⚠️',
             );
           }
         }
@@ -2613,8 +2578,8 @@ class NavigationController extends ChangeNotifier {
       if (margin >= _initialFixMinMarginDb) {
         _log(
           'NAV## initial fix ACCEPTED — '
-              '$bestName strengthening '
-              '(margin=${margin.toStringAsFixed(1)}dB)',
+          '$bestName strengthening '
+          '(margin=${margin.toStringAsFixed(1)}dB)',
         );
 
         return storeMap.beaconById(bestId);
@@ -2628,15 +2593,15 @@ class NavigationController extends ChangeNotifier {
     if (elapsed < _initialFixMaxWait) {
       _log(
         'NAV## initial fix ambiguous — '
-            'top candidates: '
-            '${ranked.take(3).map(
+        'top candidates: '
+        '${ranked.take(3).map(
               (e) => '${storeMap.beaconById(e.key)?.name ?? e.key}:'
-              '${e.value.toStringAsFixed(1)}dB',
-        ).join(", ")} '
-            '| margin=${margin.toStringAsFixed(1)}dB '
-            '| trend=$bestTrend/$secondTrend '
-            '— waiting '
-            '(${elapsed.inMilliseconds}ms elapsed)',
+                  '${e.value.toStringAsFixed(1)}dB',
+            ).join(", ")} '
+        '| margin=${margin.toStringAsFixed(1)}dB '
+        '| trend=$bestTrend/$secondTrend '
+        '— waiting '
+        '(${elapsed.inMilliseconds}ms elapsed)',
       );
 
       return null;
@@ -2673,18 +2638,18 @@ class NavigationController extends ChangeNotifier {
           !_isPhysicallyReachable(sustainedLeaderBeacon, rssiByBleId)) {
         _log(
           'NAV## initial fix timeout — sustained leader '
-              '${sustainedLeaderBeacon.name} (streak=$sustainedLeaderStreak) '
-              'but physically unreachable → committing to best-so-far instead',
+          '${sustainedLeaderBeacon.name} (streak=$sustainedLeaderStreak) '
+          'but physically unreachable → committing to best-so-far instead',
         );
         // Fall through to best-so-far check below
       } else {
         _log(
           'NAV## initial fix timeout — '
-              '$bestName only just took the lead, '
-              'accepting sustained leader '
-              '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
-              'instead (streak=$sustainedLeaderStreak) '
-              'reachabilityChecked=${_metersSinceBeacon > 0}',
+          '$bestName only just took the lead, '
+          'accepting sustained leader '
+          '${storeMap.beaconById(sustainedLeaderId)?.name ?? sustainedLeaderId} '
+          'instead (streak=$sustainedLeaderStreak) '
+          'reachabilityChecked=${_metersSinceBeacon > 0}',
         );
 
         _isInitialFixComplete = true;
@@ -2698,9 +2663,9 @@ class NavigationController extends ChangeNotifier {
         margin >= _initialFixTimeoutTrendMinMarginDb) {
       _log(
         'NAV## initial fix timeout — '
-            'accepting $bestName based on trend '
-            '(margin=${margin.toStringAsFixed(1)}dB '
-            'trend=$bestTrend/$secondTrend)',
+        'accepting $bestName based on trend '
+        '(margin=${margin.toStringAsFixed(1)}dB '
+        'trend=$bestTrend/$secondTrend)',
       );
 
       _isInitialFixComplete = true;
@@ -2718,45 +2683,40 @@ class NavigationController extends ChangeNotifier {
         !_isPhysicallyReachable(bestBeaconForFallback, rssiByBleId)) {
       _log(
         'NAV## initial fix timeout — '
-            '$bestName would be accepted but is physically unreachable '
-            '(metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(1)}m) '
-            '→ wait for closer beacon',
+        '$bestName would be accepted but is physically unreachable '
+        '(metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(1)}m) '
+        '→ wait for closer beacon',
       );
       return null;
     }
 
-
-    if(margin > 1.4 && ( bestTrend  == _InitialFixTrend.strengthening || bestTrend  == _InitialFixTrend.stable)) {
+    if (margin > 1.4 &&
+        (bestTrend == _InitialFixTrend.strengthening ||
+            bestTrend == _InitialFixTrend.stable)) {
       _log(
         'NAV## initial fix timeout — '
-            'no trend advantage, committing to best-so-far '
-            '$bestName '
-            '(margin=${margin.toStringAsFixed(1)}dB '
-            'trend=$bestTrend/$secondTrend) '
-            'reachabilityChecked=${_metersSinceBeacon > 0}',
+        'no trend advantage, committing to best-so-far '
+        '$bestName '
+        '(margin=${margin.toStringAsFixed(1)}dB '
+        'trend=$bestTrend/$secondTrend) '
+        'reachabilityChecked=${_metersSinceBeacon > 0}',
       );
+    } else {
+      _log(
+        'NAV## initial fix timeout — '
+        'no trend advantage, ABORTED '
+        '$bestName '
+        '(margin=${margin.toStringAsFixed(1)}dB '
+        'trend=$bestTrend/$secondTrend) '
+        'reachabilityChecked=${_metersSinceBeacon > 0}',
+      );
+
+      return null;
     }
-    else
-      {
-
-        _log(
-          'NAV## initial fix timeout — '
-              'no trend advantage, ABORTED '
-              '$bestName '
-              '(margin=${margin.toStringAsFixed(1)}dB '
-              'trend=$bestTrend/$secondTrend) '
-              'reachabilityChecked=${_metersSinceBeacon > 0}',
-        );
-
-        return null;
-
-      }
 
     _isInitialFixComplete = true;
     return storeMap.beaconById(bestId);
   }
-
-
 
   // Beacon? _selectInitialFixCandidate(
   //   Map<String, double> rssiByBleId,
@@ -2886,9 +2846,9 @@ class NavigationController extends ChangeNotifier {
   ///
   /// This remains true even if C/D have dramatically stronger RSSI.
   bool _isNavigationHopValid(
-      Beacon? current,
-      Beacon candidate,
-      ) {
+    Beacon? current,
+    Beacon candidate,
+  ) {
     if (current == null) {
       return true;
     }
@@ -2925,19 +2885,17 @@ class NavigationController extends ChangeNotifier {
 
     if (_enableRouteLookAhead) {
       final nextIndex = currentPath.indexWhere(
-            (b) => b.id == next.id,
+        (b) => b.id == next.id,
       );
 
-      if (nextIndex >= 0 &&
-          nextIndex + 1 < currentPath.length) {
+      if (nextIndex >= 0 && nextIndex + 1 < currentPath.length) {
         final secondary = currentPath[nextIndex + 1];
 
-        if (candidate.id == secondary.id &&
-            _primaryHasBeenPassed()) {
+        if (candidate.id == secondary.id && _primaryHasBeenPassed()) {
           _log(
             'NAV## CONTROLLED SECONDARY HOP ALLOWED: '
-                '${current.name} → ${candidate.name}; '
-                'primary=${next.name}',
+            '${current.name} → ${candidate.name}; '
+            'primary=${next.name}',
           );
 
           return true;
@@ -2951,56 +2909,46 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## TELEPORT BLOCKED: '
-          '${current.name} → ${candidate.name}; '
-          'expected next=${next.name}',
+      '${current.name} → ${candidate.name}; '
+      'expected next=${next.name}',
     );
 
     return false;
   }
 
-
-  static const double _candidateCompetitiveMarginDb = 2.0;
+  double get _candidateCompetitiveMarginDb =>
+      navigationConfig.candidateCompetitiveMarginDb;
 
   bool _shouldSwitchBeacon(
-      Beacon candidate,
-      Map<String, double> rssiByBleId,
-      ) {
+    Beacon candidate,
+    Map<String, double> rssiByBleId,
+  ) {
     final current = currentBeacon;
-
 
     _log(
       'NAV### SHOULD SWITCH DEBUG '
-          'current=${current?.name ?? "none"} '
-          'candidate=${candidate.name} '
-          'currentRSSI='
-          '${current == null
-          ? "none"
-          : (_smoothedRssi(current.id) ??
-          _rssiForBeacon(current, rssiByBleId))
-          ?.toStringAsFixed(1) ?? "none"} '
-          'candidateRSSI='
-          '${(_smoothedRssi(candidate.id) ??
-          _rssiForBeacon(candidate, rssiByBleId))
-          ?.toStringAsFixed(1) ?? "none"} '
-          'meters=${_metersSinceBeacon.toStringAsFixed(2)} '
-          'currentPeak='
-          '${_currentBeaconState?.peakRssi?.toStringAsFixed(1) ?? "none"} '
-          'currentWeakening='
-          '${_currentBeaconState?.consecutiveWeakeningReadings ?? 0} '
-          'candidateStrengthening='
-          '${_primaryCandidateState?.consecutiveStrengtheningReadings ?? 0} '
-          'candidateWeakening='
-          '${_primaryCandidateState?.consecutiveWeakeningReadings ?? 0} '
-          'candidateTrend='
-          '${_primaryCandidateState?.trend}',
+      'current=${current?.name ?? "none"} '
+      'candidate=${candidate.name} '
+      'currentRSSI='
+      '${current == null ? "none" : (_smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId))?.toStringAsFixed(1) ?? "none"} '
+      'candidateRSSI='
+      '${(_smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId))?.toStringAsFixed(1) ?? "none"} '
+      'meters=${_metersSinceBeacon.toStringAsFixed(2)} '
+      'currentPeak='
+      '${_currentBeaconState?.peakRssi?.toStringAsFixed(1) ?? "none"} '
+      'currentWeakening='
+      '${_currentBeaconState?.consecutiveWeakeningReadings ?? 0} '
+      'candidateStrengthening='
+      '${_primaryCandidateState?.consecutiveStrengtheningReadings ?? 0} '
+      'candidateWeakening='
+      '${_primaryCandidateState?.consecutiveWeakeningReadings ?? 0} '
+      'candidateTrend='
+      '${_primaryCandidateState?.trend}',
     );
-
 
     if (current == null || destinationBeacon == null) {
       return false;
     }
-
-
 
     // ------------------------------------------------------------
     // 1. Validate that candidate belongs to the route.
@@ -3008,7 +2956,7 @@ class NavigationController extends ChangeNotifier {
     if (!_isValidNavigationHop(candidate)) {
       _log(
         'NAV### REJECT ${candidate.name}: invalid navigation hop '
-            'current=${current.name}',
+        'current=${current.name}',
       );
       return false;
     }
@@ -3019,13 +2967,12 @@ class NavigationController extends ChangeNotifier {
       return false;
     }
 
-
     _log(
       'NAV### ROUTE STATE '
-          'current=${current.name} '
-          'next=${next.name} '
-          'destination=${destinationBeacon?.name ?? "none"} '
-          'path=${currentPath.map((b) => b.name).join(" → ")}',
+      'current=${current.name} '
+      'next=${next.name} '
+      'destination=${destinationBeacon?.name ?? "none"} '
+      'path=${currentPath.map((b) => b.name).join(" → ")}',
     );
 
     // ------------------------------------------------------------
@@ -3046,54 +2993,47 @@ class NavigationController extends ChangeNotifier {
       final secondaryState = _secondaryCandidateState;
 
       final secondaryRssi =
-      secondaryState != null &&
-          secondaryState.beacon.id == candidate.id
-          ? (
-          secondaryState.latestRssi ??
-              _smoothedRssi(candidate.id) ??
-              _rssiForBeacon(candidate, rssiByBleId)
-      )
-          : null;
+          secondaryState != null && secondaryState.beacon.id == candidate.id
+              ? (secondaryState.latestRssi ??
+                  _smoothedRssi(candidate.id) ??
+                  _rssiForBeacon(candidate, rssiByBleId))
+              : null;
 
       final currentRssi =
-          _smoothedRssi(current.id) ??
-              _rssiForBeacon(current, rssiByBleId);
+          _smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId);
 
       if (secondaryRssi == null || currentRssi == null) {
         _log(
           'NAV### REJECT ${candidate.name}: '
-              'secondary/current RSSI unavailable '
-              'current=${currentRssi?.toStringAsFixed(1) ?? "none"} '
-              'secondary=${secondaryRssi?.toStringAsFixed(1) ?? "none"}',
+          'secondary/current RSSI unavailable '
+          'current=${currentRssi?.toStringAsFixed(1) ?? "none"} '
+          'secondary=${secondaryRssi?.toStringAsFixed(1) ?? "none"}',
         );
 
         return false;
       }
 
-      final secondaryDelta =
-          secondaryRssi - currentRssi;
+      final secondaryDelta = secondaryRssi - currentRssi;
 
       final secondaryIsCompetitive =
-          secondaryRssi >=
-              currentRssi - _candidateCompetitiveMarginDb;
+          secondaryRssi >= currentRssi - _candidateCompetitiveMarginDb;
 
-      final controlledSecondary =
-          _enableRouteLookAhead &&
-              secondaryState != null &&
-              secondaryState.beacon.id == candidate.id &&
-              _primaryHasBeenPassed() &&
-              secondaryIsCompetitive;
+      final controlledSecondary = _enableRouteLookAhead &&
+          secondaryState != null &&
+          secondaryState.beacon.id == candidate.id &&
+          _primaryHasBeenPassed() &&
+          secondaryIsCompetitive;
 
       if (!controlledSecondary) {
         _log(
           'NAV### REJECT ${candidate.name}: not valid controlled '
-              'secondary skip '
-              'current=${current.name} '
-              'next=${next.name} '
-              'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
-              'currentRSSI=${currentRssi.toStringAsFixed(1)} '
-              'delta=${secondaryDelta.toStringAsFixed(1)}dB '
-              'competitive=$secondaryIsCompetitive',
+          'secondary skip '
+          'current=${current.name} '
+          'next=${next.name} '
+          'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+          'currentRSSI=${currentRssi.toStringAsFixed(1)} '
+          'delta=${secondaryDelta.toStringAsFixed(1)}dB '
+          'competitive=$secondaryIsCompetitive',
         );
 
         return false;
@@ -3101,33 +3041,31 @@ class NavigationController extends ChangeNotifier {
 
       _log(
         'NAV### APPROVED controlled secondary skip '
-            '${current.name} → ${candidate.name} '
-            'currentRSSI=${currentRssi.toStringAsFixed(1)} '
-            'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
-            'delta=${secondaryDelta.toStringAsFixed(1)}dB',
+        '${current.name} → ${candidate.name} '
+        'currentRSSI=${currentRssi.toStringAsFixed(1)} '
+        'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+        'delta=${secondaryDelta.toStringAsFixed(1)}dB',
       );
 
-    //  return _passesPhysicalSafetyGate(candidate);
-   return true;
+      //  return _passesPhysicalSafetyGate(candidate);
+      return true;
     }
 
     // ------------------------------------------------------------
     // 3. Get RSSI.
     // ------------------------------------------------------------
     final currentRssi =
-        _smoothedRssi(current.id) ??
-            _rssiForBeacon(current, rssiByBleId);
+        _smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId);
 
     final candidateRssi =
-        _smoothedRssi(candidate.id) ??
-            _rssiForBeacon(candidate, rssiByBleId);
+        _smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId);
 
     if (currentRssi == null || candidateRssi == null) {
       _log(
         'NAV### WAIT ${current.name} → ${candidate.name}: '
-            'missing RSSI '
-            'current=${currentRssi?.toStringAsFixed(1) ?? "none"} '
-            'candidate=${candidateRssi?.toStringAsFixed(1) ?? "none"}',
+        'missing RSSI '
+        'current=${currentRssi?.toStringAsFixed(1) ?? "none"} '
+        'candidate=${candidateRssi?.toStringAsFixed(1) ?? "none"}',
       );
 
       return false;
@@ -3147,20 +3085,19 @@ class NavigationController extends ChangeNotifier {
     // This is relative and therefore does not depend on absolute
     // RSSI values or beacon placement.
     final candidateIsCompetitive =
-        candidateRssi >=
-            currentRssi - _candidateCompetitiveMarginDb;
+        candidateRssi >= currentRssi - _candidateCompetitiveMarginDb;
 
     _log(
       'NAV## SWITCH VALIDATION '
-          '${current.name} → ${candidate.name} '
-          'currentRSSI=${currentRssi.toStringAsFixed(1)} '
-          'candidateRSSI=${candidateRssi.toStringAsFixed(1)} '
-          'delta=${delta.toStringAsFixed(1)}dB '
-          'competitive=$candidateIsCompetitive '
-          'margin=${_candidateCompetitiveMarginDb.toStringAsFixed(1)}dB '
-          'currentTrend=$currentTrend '
-          'candidateTrend=$candidateTrend '
-          'lookAhead=$_enableRouteLookAhead',
+      '${current.name} → ${candidate.name} '
+      'currentRSSI=${currentRssi.toStringAsFixed(1)} '
+      'candidateRSSI=${candidateRssi.toStringAsFixed(1)} '
+      'delta=${delta.toStringAsFixed(1)}dB '
+      'competitive=$candidateIsCompetitive '
+      'margin=${_candidateCompetitiveMarginDb.toStringAsFixed(1)}dB '
+      'currentTrend=$currentTrend '
+      'candidateTrend=$candidateTrend '
+      'lookAhead=$_enableRouteLookAhead',
     );
 
     // ------------------------------------------------------------
@@ -3171,11 +3108,11 @@ class NavigationController extends ChangeNotifier {
     if (delta >= 2.0) {
       _log(
         'NAV### SWITCH APPROVED '
-            '${current.name} → ${candidate.name} '
-            'reason=strong RSSI crossover',
+        '${current.name} → ${candidate.name} '
+        'reason=strong RSSI crossover',
       );
 
-      return _passesPhysicalSafetyGate(candidate,rssiByBleId);
+      return _passesPhysicalSafetyGate(candidate, rssiByBleId);
     }
 
     // ------------------------------------------------------------
@@ -3190,34 +3127,26 @@ class NavigationController extends ChangeNotifier {
     // ------------------------------------------------------------
     final currentState = _currentBeaconState;
 
-    final currentDroppedFromPeak =
-        currentState != null &&
-            currentState.beacon.id == current.id &&
-            currentState.peakRssi != null &&
-            currentRssi <=
-                currentState.peakRssi! - _candidatePeakToleranceDb;
+    final currentDroppedFromPeak = currentState != null &&
+        currentState.beacon.id == current.id &&
+        currentState.peakRssi != null &&
+        currentRssi <= currentState.peakRssi! - _candidatePeakToleranceDb;
 
-    final currentWeakening =
-        currentState != null &&
-            currentState.beacon.id == current.id &&
-            (
-                currentState.trend == _RssiTrend.awayFromNext ||
-                    currentState.consecutiveWeakeningReadings >=
-                        _candidateWeakeningReadingsRequired
-            );
+    final currentWeakening = currentState != null &&
+        currentState.beacon.id == current.id &&
+        (currentState.trend == _RssiTrend.awayFromNext ||
+            currentState.consecutiveWeakeningReadings >=
+                _candidateWeakeningReadingsRequired);
 
     // ------------------------------------------------------------
     // 7. Candidate state.
     // ------------------------------------------------------------
     final candidateState = _primaryCandidateState;
 
-    final candidateStrengthening =
-        candidateState != null &&
-            candidateState.beacon.id == candidate.id &&
-            (
-                candidateState.trend == _RssiTrend.towardNext ||
-                    candidateState.consecutiveStrengtheningReadings >= 2
-            );
+    final candidateStrengthening = candidateState != null &&
+        candidateState.beacon.id == candidate.id &&
+        (candidateState.trend == _RssiTrend.towardNext ||
+            candidateState.consecutiveStrengtheningReadings >= 2);
 
     // ------------------------------------------------------------
     // 8. CURRENT beacon has been passed.
@@ -3245,30 +3174,26 @@ class NavigationController extends ChangeNotifier {
     // Candidate is competitive, so normal transition logic
     // can continue.
     // ------------------------------------------------------------
-    final currentPassed =
-        currentDroppedFromPeak &&
-            currentWeakening;
+    final currentPassed = currentDroppedFromPeak && currentWeakening;
 
     final nextBeaconDetected = candidateRssi != null;
 
-    if (currentPassed &&
-        nextBeaconDetected &&
-        candidateIsCompetitive) {
+    if (currentPassed && nextBeaconDetected && candidateIsCompetitive) {
       _log(
         'NAV### SWITCH APPROVED '
-            '${current.name} → ${candidate.name} '
-            'reason=current beacon passed + candidate competitive '
-            'currentPeak='
-            '${currentState?.peakRssi?.toStringAsFixed(1) ?? "none"} '
-            'currentRSSI=${currentRssi.toStringAsFixed(1)} '
-            'candidateRSSI=${candidateRssi.toStringAsFixed(1)} '
-            'delta=${delta.toStringAsFixed(1)}dB '
-            'currentDroppedFromPeak=$currentDroppedFromPeak '
-            'currentWeakening=$currentWeakening '
-            'candidateStrengthening=$candidateStrengthening',
+        '${current.name} → ${candidate.name} '
+        'reason=current beacon passed + candidate competitive '
+        'currentPeak='
+        '${currentState?.peakRssi?.toStringAsFixed(1) ?? "none"} '
+        'currentRSSI=${currentRssi.toStringAsFixed(1)} '
+        'candidateRSSI=${candidateRssi.toStringAsFixed(1)} '
+        'delta=${delta.toStringAsFixed(1)}dB '
+        'currentDroppedFromPeak=$currentDroppedFromPeak '
+        'currentWeakening=$currentWeakening '
+        'candidateStrengthening=$candidateStrengthening',
       );
 
-      return _passesPhysicalSafetyGate(candidate,rssiByBleId);
+      return _passesPhysicalSafetyGate(candidate, rssiByBleId);
     }
 
     // ------------------------------------------------------------
@@ -3276,31 +3201,29 @@ class NavigationController extends ChangeNotifier {
     //
     // This is relative to the current signal, NOT an absolute RSSI.
     // ------------------------------------------------------------
-    if (currentWeakening &&
-        candidateIsCompetitive) {
+    if (currentWeakening && candidateIsCompetitive) {
       _log(
         'NAV### SWITCH APPROVED '
-            '${current.name} → ${candidate.name} '
-            'reason=current weakening + candidate competitive '
-            'delta=${delta.toStringAsFixed(1)}dB',
+        '${current.name} → ${candidate.name} '
+        'reason=current weakening + candidate competitive '
+        'delta=${delta.toStringAsFixed(1)}dB',
       );
 
-      return _passesPhysicalSafetyGate(candidate,rssiByBleId);
+      return _passesPhysicalSafetyGate(candidate, rssiByBleId);
     }
 
     // ------------------------------------------------------------
     // 10. Candidate strengthening + candidate competitive.
     // ------------------------------------------------------------
-    if (candidateStrengthening &&
-        candidateIsCompetitive) {
+    if (candidateStrengthening && candidateIsCompetitive) {
       _log(
         'NAV### SWITCH APPROVED '
-            '${current.name} → ${candidate.name} '
-            'reason=candidate strengthening + candidate competitive '
-            'delta=${delta.toStringAsFixed(1)}dB',
+        '${current.name} → ${candidate.name} '
+        'reason=candidate strengthening + candidate competitive '
+        'delta=${delta.toStringAsFixed(1)}dB',
       );
 
-      return _passesPhysicalSafetyGate(candidate,rssiByBleId);
+      return _passesPhysicalSafetyGate(candidate, rssiByBleId);
     }
 
     // ------------------------------------------------------------
@@ -3308,19 +3231,18 @@ class NavigationController extends ChangeNotifier {
     // ------------------------------------------------------------
     _log(
       'NAV## SWITCH WAIT '
-          '${current.name} → ${candidate.name} '
-          'delta=${delta.toStringAsFixed(1)}dB '
-          'competitive=$candidateIsCompetitive '
-          'currentTrend=$currentTrend '
-          'candidateTrend=$candidateTrend '
-          'currentDroppedFromPeak=$currentDroppedFromPeak '
-          'currentWeakening=$currentWeakening '
-          'candidateStrengthening=$candidateStrengthening',
+      '${current.name} → ${candidate.name} '
+      'delta=${delta.toStringAsFixed(1)}dB '
+      'competitive=$candidateIsCompetitive '
+      'currentTrend=$currentTrend '
+      'candidateTrend=$candidateTrend '
+      'currentDroppedFromPeak=$currentDroppedFromPeak '
+      'currentWeakening=$currentWeakening '
+      'candidateStrengthening=$candidateStrengthening',
     );
 
     return false;
   }
-
 
   _RssiTrend _getRssiTrend(String beaconId) {
     final beacon = storeMap.beaconById(beaconId);
@@ -3370,12 +3292,12 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## RSSI TREND '
-          '${beacon.name} '
-          'previous=${previous.toStringAsFixed(1)} '
-          'latest=${latest.toStringAsFixed(1)} '
-          'delta=${delta.toStringAsFixed(1)}dB '
-          'threshold=${trendThresholdDb.toStringAsFixed(1)}dB '
-          'samples=${history.length}',
+      '${beacon.name} '
+      'previous=${previous.toStringAsFixed(1)} '
+      'latest=${latest.toStringAsFixed(1)} '
+      'delta=${delta.toStringAsFixed(1)}dB '
+      'threshold=${trendThresholdDb.toStringAsFixed(1)}dB '
+      'samples=${history.length}',
     );
 
     // RSSI becomes less negative = user is moving toward beacon.
@@ -3392,16 +3314,15 @@ class NavigationController extends ChangeNotifier {
   }
 
   bool _passesPhysicalSafetyGate(
-      Beacon candidate,
-      Map<String, double> rssiByBleId,
-      ) {
-    final physicallyReachable =
-    _isPhysicallyReachable(candidate, rssiByBleId);
+    Beacon candidate,
+    Map<String, double> rssiByBleId,
+  ) {
+    final physicallyReachable = _isPhysicallyReachable(candidate, rssiByBleId);
 
     if (!physicallyReachable) {
       _log(
         'NAV### REJECT ${candidate.name}: '
-            'physical safety gate failed',
+        'physical safety gate failed',
       );
 
       return false;
@@ -3422,9 +3343,9 @@ class NavigationController extends ChangeNotifier {
   ///
   ///
   bool _isPhysicallyReachable(
-      Beacon candidate,
-      Map<String, double> rssiByBleId,
-      ) {
+    Beacon candidate,
+    Map<String, double> rssiByBleId,
+  ) {
     final anchor = currentBeacon;
 
     if (anchor == null) {
@@ -3450,50 +3371,44 @@ class NavigationController extends ChangeNotifier {
     if (routeResult.path.isNotEmpty) {
       walkingDistanceMeters = routeResult.distanceMeters;
     } else {
-      walkingDistanceMeters =
-          (candidate.position - anchor.position).distance *
-              storeMap.metersPerUnit;
+      walkingDistanceMeters = (candidate.position - anchor.position).distance *
+          storeMap.metersPerUnit;
     }
 
     // -----------------------------------------------------------------------
     // NORMAL PHYSICAL REACHABILITY
     // -----------------------------------------------------------------------
 
-    final plausibleMeters =
-        _metersSinceBeacon + _reachabilityToleranceMeters;
+    final plausibleMeters = _metersSinceBeacon + _reachabilityToleranceMeters;
 
-    final reachable =
-        walkingDistanceMeters <= plausibleMeters;
+    final reachable = walkingDistanceMeters <= plausibleMeters;
 
     if (reachable) {
       _log(
         'NAV### reachability check: '
-            '${candidate.name} is '
-            '${walkingDistanceMeters.toStringAsFixed(1)}m '
-            'away via graph from ${anchor.name}, '
-            '${_metersSinceBeacon.toStringAsFixed(1)}m '
-            'walked so far '
-            '(tolerance '
-            '${_reachabilityToleranceMeters}m) '
-            '→ REACHABLE',
+        '${candidate.name} is '
+        '${walkingDistanceMeters.toStringAsFixed(1)}m '
+        'away via graph from ${anchor.name}, '
+        '${_metersSinceBeacon.toStringAsFixed(1)}m '
+        'walked so far '
+        '(tolerance '
+        '${_reachabilityToleranceMeters}m) '
+        '→ REACHABLE',
       );
 
       return true;
-    }else {
-
-
-        _log(
-          'NAV### reachability check FAILED: '
-              '${candidate.name} is '
-              '${walkingDistanceMeters.toStringAsFixed(1)}m '
-              'away via graph from ${anchor.name}, '
-              '${_metersSinceBeacon.toStringAsFixed(1)}m '
-              'walked so far '
-              '(tolerance '
-              '${_reachabilityToleranceMeters}m) '
-              '→ REACHABLE',
-        );
-
+    } else {
+      _log(
+        'NAV### reachability check FAILED: '
+        '${candidate.name} is '
+        '${walkingDistanceMeters.toStringAsFixed(1)}m '
+        'away via graph from ${anchor.name}, '
+        '${_metersSinceBeacon.toStringAsFixed(1)}m '
+        'walked so far '
+        '(tolerance '
+        '${_reachabilityToleranceMeters}m) '
+        '→ REACHABLE',
+      );
     }
 
     // -----------------------------------------------------------------------
@@ -3516,7 +3431,7 @@ class NavigationController extends ChangeNotifier {
     if (next == null || next.id != candidate.id) {
       _log(
         'NAV### REJECT ${candidate.name}: '
-            'not immediate next beacon',
+        'not immediate next beacon',
       );
 
       return false;
@@ -3527,12 +3442,10 @@ class NavigationController extends ChangeNotifier {
     // -----------------------------------------------------------------------
 
     final currentRssi =
-        _smoothedRssi(anchor.id) ??
-            _rssiForBeacon(anchor, rssiByBleId);
+        _smoothedRssi(anchor.id) ?? _rssiForBeacon(anchor, rssiByBleId);
 
     final candidateRssi =
-        _smoothedRssi(candidate.id) ??
-            _rssiForBeacon(candidate, rssiByBleId);
+        _smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId);
 
     // -----------------------------------------------------------------------
     // Current beacon must clearly be weakening.
@@ -3542,19 +3455,14 @@ class NavigationController extends ChangeNotifier {
 
     final currentPeak = currentState?.peakRssi;
 
-    final currentDroppedFromPeak =
-        currentPeak != null &&
-            currentRssi != null &&
-            currentRssi <=
-                currentPeak - _candidatePeakToleranceDb;
+    final currentDroppedFromPeak = currentPeak != null &&
+        currentRssi != null &&
+        currentRssi <= currentPeak - _candidatePeakToleranceDb;
 
-    final currentWeakening =
-        currentState != null &&
-            (
-                currentState.trend == _RssiTrend.awayFromNext ||
-                    currentState.consecutiveWeakeningReadings >=
-                        _candidateWeakeningReadingsRequired
-            );
+    final currentWeakening = currentState != null &&
+        (currentState.trend == _RssiTrend.awayFromNext ||
+            currentState.consecutiveWeakeningReadings >=
+                _candidateWeakeningReadingsRequired);
 
     // -----------------------------------------------------------------------
     // Candidate should be strengthening.
@@ -3562,50 +3470,46 @@ class NavigationController extends ChangeNotifier {
 
     final candidateState = _primaryCandidateState;
 
-    final candidateStrengthening =
-        candidateState != null &&
-            candidateState.consecutiveStrengtheningReadings >= 2;
+    final candidateStrengthening = candidateState != null &&
+        candidateState.consecutiveStrengtheningReadings >= 2;
 
     // -----------------------------------------------------------------------
     // Candidate should be reasonably competitive with current beacon.
     // -----------------------------------------------------------------------
 
-    final candidateCompetitive =
-        currentRssi != null &&
-            candidateRssi != null &&
-            candidateRssi >=
-                currentRssi - _candidateCompetitiveMarginDb;
+    final candidateCompetitive = currentRssi != null &&
+        candidateRssi != null &&
+        candidateRssi >= currentRssi - _candidateCompetitiveMarginDb;
 
     // -----------------------------------------------------------------------
     // Strong RSSI handoff
     // -----------------------------------------------------------------------
 
-    final strongRssiHandoff =
-        currentDroppedFromPeak &&
-            currentWeakening &&
-            candidateStrengthening &&
-            candidateCompetitive;
+    final strongRssiHandoff = currentDroppedFromPeak &&
+        currentWeakening &&
+        candidateStrengthening &&
+        candidateCompetitive;
 
     if (strongRssiHandoff) {
       _log(
         'NAV### FAST-WALK RSSI HANDOFF '
-            '${anchor.name} → ${candidate.name} '
-            'graphDistance='
-            '${walkingDistanceMeters.toStringAsFixed(1)}m '
-            'metersSinceBeacon='
-            '${_metersSinceBeacon.toStringAsFixed(1)}m '
-            'tolerance=${_reachabilityToleranceMeters}m '
-            'currentPeak='
-            '${currentPeak?.toStringAsFixed(1) ?? "none"} '
-            'currentRSSI='
-            '${currentRssi?.toStringAsFixed(1) ?? "none"} '
-            'candidateRSSI='
-            '${candidateRssi?.toStringAsFixed(1) ?? "none"} '
-            'currentDroppedFromPeak=$currentDroppedFromPeak '
-            'currentWeakening=$currentWeakening '
-            'candidateStrengthening=$candidateStrengthening '
-            'competitive=$candidateCompetitive '
-            '→ ALLOWED',
+        '${anchor.name} → ${candidate.name} '
+        'graphDistance='
+        '${walkingDistanceMeters.toStringAsFixed(1)}m '
+        'metersSinceBeacon='
+        '${_metersSinceBeacon.toStringAsFixed(1)}m '
+        'tolerance=${_reachabilityToleranceMeters}m '
+        'currentPeak='
+        '${currentPeak?.toStringAsFixed(1) ?? "none"} '
+        'currentRSSI='
+        '${currentRssi?.toStringAsFixed(1) ?? "none"} '
+        'candidateRSSI='
+        '${candidateRssi?.toStringAsFixed(1) ?? "none"} '
+        'currentDroppedFromPeak=$currentDroppedFromPeak '
+        'currentWeakening=$currentWeakening '
+        'candidateStrengthening=$candidateStrengthening '
+        'competitive=$candidateCompetitive '
+        '→ ALLOWED',
       );
 
       return true;
@@ -3617,14 +3521,14 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV### reachability check: '
-          '${candidate.name} is '
-          '${walkingDistanceMeters.toStringAsFixed(1)}m '
-          'away via graph from ${anchor.name}, '
-          '${_metersSinceBeacon.toStringAsFixed(1)}m '
-          'walked so far '
-          '(tolerance '
-          '${_reachabilityToleranceMeters}m) '
-          '→ REJECTED',
+      '${candidate.name} is '
+      '${walkingDistanceMeters.toStringAsFixed(1)}m '
+      'away via graph from ${anchor.name}, '
+      '${_metersSinceBeacon.toStringAsFixed(1)}m '
+      'walked so far '
+      '(tolerance '
+      '${_reachabilityToleranceMeters}m) '
+      '→ REJECTED',
     );
 
     return false;
@@ -3677,15 +3581,13 @@ class NavigationController extends ChangeNotifier {
   //   return reachable;
   // }
 
-
-  static const double _lookAheadSecondaryLeadDb = 4.0;
+  double get _lookAheadSecondaryLeadDb =>
+      navigationConfig.lookAheadSecondaryLeadDb;
   bool _primaryHasBeenPassed() {
     final primary = _primaryCandidateState;
     final secondary = _secondaryCandidateState;
 
-    if (!_enableRouteLookAhead ||
-        primary == null ||
-        secondary == null) {
+    if (!_enableRouteLookAhead || primary == null || secondary == null) {
       return false;
     }
 
@@ -3697,140 +3599,131 @@ class NavigationController extends ChangeNotifier {
     }
 
     // Primary must have genuinely weakened from its observed peak.
-    final primaryDroppedFromPeak =
-        primary.peakRssi != null &&
-            primaryRssi <=
-                primary.peakRssi! - _candidatePeakToleranceDb;
+    final primaryDroppedFromPeak = primary.peakRssi != null &&
+        primaryRssi <= primary.peakRssi! - _candidatePeakToleranceDb;
 
     // Primary must also be showing a weakening signal.
-    final primaryWeakening =
-        primary.trend == _RssiTrend.awayFromNext ||
-            primary.consecutiveWeakeningReadings >=
-                _candidateWeakeningReadingsRequired;
+    final primaryWeakening = primary.trend == _RssiTrend.awayFromNext ||
+        primary.consecutiveWeakeningReadings >=
+            _candidateWeakeningReadingsRequired;
 
     // Secondary must be CLEARLY stronger than the primary
     // before we allow a look-ahead skip.
-    final secondaryLeadDb =
-        secondaryRssi - primaryRssi;
+    final secondaryLeadDb = secondaryRssi - primaryRssi;
 
     final secondaryClearlyStronger =
         secondaryLeadDb >= _lookAheadSecondaryLeadDb;
 
     final passed =
-        primaryDroppedFromPeak &&
-            primaryWeakening &&
-            secondaryClearlyStronger;
+        primaryDroppedFromPeak && primaryWeakening && secondaryClearlyStronger;
 
     if (passed) {
       _log(
         'NAV## PRIMARY PASSED '
-            'primary=${primary.beacon.name} '
-            'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
-            'primaryPeak=${primary.peakRssi?.toStringAsFixed(1) ?? "none"} '
-            'primaryTrend=${primary.trend} '
-            'primaryWeakening=$primaryWeakening '
-            'secondary=${secondary.beacon.name} '
-            'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
-            'secondaryLead=${secondaryLeadDb.toStringAsFixed(1)}dB '
-            'required=${_lookAheadSecondaryLeadDb.toStringAsFixed(1)}dB',
+        'primary=${primary.beacon.name} '
+        'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
+        'primaryPeak=${primary.peakRssi?.toStringAsFixed(1) ?? "none"} '
+        'primaryTrend=${primary.trend} '
+        'primaryWeakening=$primaryWeakening '
+        'secondary=${secondary.beacon.name} '
+        'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+        'secondaryLead=${secondaryLeadDb.toStringAsFixed(1)}dB '
+        'required=${_lookAheadSecondaryLeadDb.toStringAsFixed(1)}dB',
       );
     }
 
     return passed;
   }
 
- // _primaryHasBeenPassed() {
- //    final primary = _primaryCandidateState;
- //    final secondary = _secondaryCandidateState;
- //
- //    if (!_enableRouteLookAhead ||
- //        primary == null ||
- //        secondary == null) {
- //      return false;
- //    }
- //
- //    final primaryRssi = primary.latestRssi;
- //    final secondaryRssi = secondary.latestRssi;
- //
- //    // If either beacon is no longer currently visible,
- //    // do not allow look-ahead based on stale candidate state.
- //    if (primaryRssi == null || secondaryRssi == null) {
- //      return false;
- //    }
- //
- //    // -------------------------------------------------------------------------
- //    // 1. PRIMARY HAS DROPPED SIGNIFICANTLY FROM ITS PEAK
- //    // -------------------------------------------------------------------------
- //
- //    final primaryDroppedFromPeak =
- //        primary.peakRssi != null &&
- //            primaryRssi <=
- //                primary.peakRssi! - _candidatePeakToleranceDb;
- //
- //    // -------------------------------------------------------------------------
- //    // 2. PRIMARY IS CURRENTLY WEAKENING
- //    // -------------------------------------------------------------------------
- //
- //    final primaryWeakening =
- //        primary.trend == _RssiTrend.awayFromNext ||
- //            primary.consecutiveWeakeningReadings >=
- //                _candidateWeakeningReadingsRequired;
- //
- //    // -------------------------------------------------------------------------
- //    // 3. SECONDARY IS STRENGTHENING
- //    // -------------------------------------------------------------------------
- //
- //    final secondaryStrengthening =
- //        secondary.trend == _RssiTrend.towardNext ||
- //            secondary.consecutiveStrengtheningReadings >= 2;
- //
- //    // -------------------------------------------------------------------------
- //    // 4. PRIMARY PASSED
- //    //
- //    // The primary must have:
- //    //
- //    //   - reached a peak
- //    //   - subsequently dropped from that peak
- //    //   - and either be weakening OR have a strengthening secondary
- //    //
- //    // IMPORTANT:
- //    // Do NOT make this state sticky.
- //    //
- //    // RSSI is continuously evaluated because a beacon can temporarily weaken
- //    // due to orientation, walls, body blocking, interference, etc.
- //    // -------------------------------------------------------------------------
- //
- //    final passed =
- //        primaryDroppedFromPeak &&
- //            (
- //                primaryWeakening ||
- //                    secondaryStrengthening
- //            );
- //
- //    if (passed) {
- //      _log(
- //        'NAV## PRIMARY PASSED '
- //            'primary=${primary.beacon.name} '
- //            'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
- //            'primaryPeak=${primary.peakRssi?.toStringAsFixed(1) ?? "none"} '
- //            'primaryTrend=${primary.trend} '
- //            'primaryWeakening=$primaryWeakening '
- //            'secondary=${secondary.beacon.name} '
- //            'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
- //            'secondaryTrend=${secondary.trend} '
- //            'secondaryStrengthening=$secondaryStrengthening',
- //      );
- //    }
- //
- //    return passed;
- //  }
-
-
-
+  // _primaryHasBeenPassed() {
+  //    final primary = _primaryCandidateState;
+  //    final secondary = _secondaryCandidateState;
+  //
+  //    if (!_enableRouteLookAhead ||
+  //        primary == null ||
+  //        secondary == null) {
+  //      return false;
+  //    }
+  //
+  //    final primaryRssi = primary.latestRssi;
+  //    final secondaryRssi = secondary.latestRssi;
+  //
+  //    // If either beacon is no longer currently visible,
+  //    // do not allow look-ahead based on stale candidate state.
+  //    if (primaryRssi == null || secondaryRssi == null) {
+  //      return false;
+  //    }
+  //
+  //    // -------------------------------------------------------------------------
+  //    // 1. PRIMARY HAS DROPPED SIGNIFICANTLY FROM ITS PEAK
+  //    // -------------------------------------------------------------------------
+  //
+  //    final primaryDroppedFromPeak =
+  //        primary.peakRssi != null &&
+  //            primaryRssi <=
+  //                primary.peakRssi! - _candidatePeakToleranceDb;
+  //
+  //    // -------------------------------------------------------------------------
+  //    // 2. PRIMARY IS CURRENTLY WEAKENING
+  //    // -------------------------------------------------------------------------
+  //
+  //    final primaryWeakening =
+  //        primary.trend == _RssiTrend.awayFromNext ||
+  //            primary.consecutiveWeakeningReadings >=
+  //                _candidateWeakeningReadingsRequired;
+  //
+  //    // -------------------------------------------------------------------------
+  //    // 3. SECONDARY IS STRENGTHENING
+  //    // -------------------------------------------------------------------------
+  //
+  //    final secondaryStrengthening =
+  //        secondary.trend == _RssiTrend.towardNext ||
+  //            secondary.consecutiveStrengtheningReadings >= 2;
+  //
+  //    // -------------------------------------------------------------------------
+  //    // 4. PRIMARY PASSED
+  //    //
+  //    // The primary must have:
+  //    //
+  //    //   - reached a peak
+  //    //   - subsequently dropped from that peak
+  //    //   - and either be weakening OR have a strengthening secondary
+  //    //
+  //    // IMPORTANT:
+  //    // Do NOT make this state sticky.
+  //    //
+  //    // RSSI is continuously evaluated because a beacon can temporarily weaken
+  //    // due to orientation, walls, body blocking, interference, etc.
+  //    // -------------------------------------------------------------------------
+  //
+  //    final passed =
+  //        primaryDroppedFromPeak &&
+  //            (
+  //                primaryWeakening ||
+  //                    secondaryStrengthening
+  //            );
+  //
+  //    if (passed) {
+  //      _log(
+  //        'NAV## PRIMARY PASSED '
+  //            'primary=${primary.beacon.name} '
+  //            'primaryRSSI=${primaryRssi.toStringAsFixed(1)} '
+  //            'primaryPeak=${primary.peakRssi?.toStringAsFixed(1) ?? "none"} '
+  //            'primaryTrend=${primary.trend} '
+  //            'primaryWeakening=$primaryWeakening '
+  //            'secondary=${secondary.beacon.name} '
+  //            'secondaryRSSI=${secondaryRssi.toStringAsFixed(1)} '
+  //            'secondaryTrend=${secondary.trend} '
+  //            'secondaryStrengthening=$secondaryStrengthening',
+  //      );
+  //    }
+  //
+  //    return passed;
+  //  }
 
   void _updateCurrentBeaconState(
-      Map<String, double> rssiByBleId,
-      ) {
+    Map<String, double> rssiByBleId,
+  ) {
     final current = currentBeacon;
 
     if (current == null) {
@@ -3848,10 +3741,9 @@ class NavigationController extends ChangeNotifier {
     );
   }
 
-
   void _updateBeaconCandidateStates(
-      Map<String, double> rssiByBleId,
-      ) {
+    Map<String, double> rssiByBleId,
+  ) {
     final current = currentBeacon;
 
     if (current == null || currentPath.isEmpty) {
@@ -3860,8 +3752,7 @@ class NavigationController extends ChangeNotifier {
       return;
     }
 
-    final currentIndex =
-    currentPath.indexWhere((b) => b.id == current.id);
+    final currentIndex = currentPath.indexWhere((b) => b.id == current.id);
 
     if (currentIndex < 0) {
       _primaryCandidateState = null;
@@ -3869,28 +3760,22 @@ class NavigationController extends ChangeNotifier {
       return;
     }
 
-    final primary =
-    currentIndex + 1 < currentPath.length
+    final primary = currentIndex + 1 < currentPath.length
         ? currentPath[currentIndex + 1]
         : null;
 
-    final secondary =
-    currentIndex + 2 < currentPath.length
+    final secondary = currentIndex + 2 < currentPath.length
         ? currentPath[currentIndex + 2]
         : null;
 
     if (_primaryCandidateState?.beacon.id != primary?.id) {
       _primaryCandidateState =
-      primary == null
-          ? null
-          : _BeaconCandidateState(primary);
+          primary == null ? null : _BeaconCandidateState(primary);
     }
 
     if (_secondaryCandidateState?.beacon.id != secondary?.id) {
       _secondaryCandidateState =
-      secondary == null
-          ? null
-          : _BeaconCandidateState(secondary);
+          secondary == null ? null : _BeaconCandidateState(secondary);
     }
 
     if (_primaryCandidateState != null) {
@@ -3909,9 +3794,9 @@ class NavigationController extends ChangeNotifier {
   }
 
   void _updateSingleBeaconCandidateState(
-      _BeaconCandidateState state,
-      Map<String, double> rssiByBleId,
-      ) {
+    _BeaconCandidateState state,
+    Map<String, double> rssiByBleId,
+  ) {
     final rawRssi = _rssiForBeacon(
       state.beacon,
       rssiByBleId,
@@ -3921,8 +3806,7 @@ class NavigationController extends ChangeNotifier {
       return;
     }
 
-    final rssi =
-        _smoothedRssi(state.beacon.id) ?? rawRssi;
+    final rssi = _smoothedRssi(state.beacon.id) ?? rawRssi;
 
     final previous = state.latestRssi;
 
@@ -3951,8 +3835,7 @@ class NavigationController extends ChangeNotifier {
 
     if (state.peakRssi != null &&
         state.latestRssi != null &&
-        state.latestRssi! <=
-            state.peakRssi! - _candidatePeakToleranceDb &&
+        state.latestRssi! <= state.peakRssi! - _candidatePeakToleranceDb &&
         state.consecutiveWeakeningReadings >=
             _candidateWeakeningReadingsRequired) {
       state.hasPassedPeak = true;
@@ -3962,13 +3845,13 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## CANDIDATE STATE '
-          '${state.beacon.name} '
-          'rssi=${rssi.toStringAsFixed(1)} '
-          'peak=${state.peakRssi?.toStringAsFixed(1) ?? "none"} '
-          'trend=${state.trend} '
-          'strengthening=${state.consecutiveStrengtheningReadings} '
-          'weakening=${state.consecutiveWeakeningReadings} '
-          'passedPeak=${state.hasPassedPeak}',
+      '${state.beacon.name} '
+      'rssi=${rssi.toStringAsFixed(1)} '
+      'peak=${state.peakRssi?.toStringAsFixed(1) ?? "none"} '
+      'trend=${state.trend} '
+      'strengthening=${state.consecutiveStrengtheningReadings} '
+      'weakening=${state.consecutiveWeakeningReadings} '
+      'passedPeak=${state.hasPassedPeak}',
     );
   }
 
@@ -4122,7 +4005,7 @@ class NavigationController extends ChangeNotifier {
     }
 
     if (samples.length < 2) {
-      return 0.0;  // Single sample has zero variance
+      return 0.0; // Single sample has zero variance
     }
 
     final mean = _average(samples);
@@ -4219,8 +4102,8 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   void _onStep(
-      double distanceMeters,
-      ) {
+    double distanceMeters,
+  ) {
     if (distanceMeters <= 0.0) {
       return;
     }
@@ -4236,8 +4119,8 @@ class NavigationController extends ChangeNotifier {
 
     _log(
       'NAV## steps taken '
-          'distanceMeters=${distanceMeters.toStringAsFixed(2)} '
-          '_metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(2)}',
+      'distanceMeters=${distanceMeters.toStringAsFixed(2)} '
+      '_metersSinceBeacon=${_metersSinceBeacon.toStringAsFixed(2)}',
     );
 
     final startBeacon = currentBeacon;
@@ -4286,9 +4169,7 @@ class NavigationController extends ChangeNotifier {
       _RssiTrend.awayFromNext => 0.0,
     };
 
-    _segmentProgressMeters = (
-        _segmentProgressMeters + effectiveDelta
-    ).clamp(
+    _segmentProgressMeters = (_segmentProgressMeters + effectiveDelta).clamp(
       0.0,
       segment,
     );
@@ -4296,16 +4177,16 @@ class NavigationController extends ChangeNotifier {
     final forwardRatio = segment <= 0.0
         ? 0.0
         : (_segmentProgressMeters / segment).clamp(
-      0.0,
-      1.0,
-    );
+            0.0,
+            1.0,
+          );
 
     _log(
       'NAV## PDR progress '
-          '${startBeacon.name} → ${next.name} '
-          'forward=${(forwardRatio * 100).toStringAsFixed(0)}% '
-          'trend=$_nextBeaconTrend '
-          'effectiveDelta=${effectiveDelta.toStringAsFixed(2)}',
+      '${startBeacon.name} → ${next.name} '
+      'forward=${(forwardRatio * 100).toStringAsFixed(0)}% '
+      'trend=$_nextBeaconTrend '
+      'effectiveDelta=${effectiveDelta.toStringAsFixed(2)}',
     );
 
     // -------------------------------------------------------------------------
@@ -4320,10 +4201,10 @@ class NavigationController extends ChangeNotifier {
     if (forwardRatio >= 0.90) {
       _log(
         'NAV## PDR THRESHOLD '
-            '${startBeacon.name} → ${next.name} '
-            'forward=${(forwardRatio * 100).toStringAsFixed(0)}% '
-            'trend=$_nextBeaconTrend '
-            '— RSSI confirmation required; beacon will NOT advance from PDR',
+        '${startBeacon.name} → ${next.name} '
+        'forward=${(forwardRatio * 100).toStringAsFixed(0)}% '
+        'trend=$_nextBeaconTrend '
+        '— RSSI confirmation required; beacon will NOT advance from PDR',
       );
     }
 
@@ -4348,8 +4229,6 @@ class NavigationController extends ChangeNotifier {
     notifyListeners();
   }
 
-
-
   bool _isUserOnCurrentRouteSegment() {
     final current = currentBeacon;
     if (current == null || liveUserPosition == null) {
@@ -4373,8 +4252,7 @@ class NavigationController extends ChangeNotifier {
     final abx = bx - ax;
     final aby = by - ay;
 
-    final segmentLengthSquared =
-        (abx * abx) + (aby * aby);
+    final segmentLengthSquared = (abx * abx) + (aby * aby);
 
     if (segmentLengthSquared <= 0.0001) {
       return false;
@@ -4385,8 +4263,7 @@ class NavigationController extends ChangeNotifier {
     final apy = py - ay;
 
     // Project user position onto the route segment.
-    final t = ((apx * abx) + (apy * aby)) /
-        segmentLengthSquared;
+    final t = ((apx * abx) + (apy * aby)) / segmentLengthSquared;
 
     final clampedT = t.clamp(0.0, 1.0);
 
@@ -4402,30 +4279,26 @@ class NavigationController extends ChangeNotifier {
     );
 
     // Your map uses metersPerUnit = 0.104.
-    final deviationMeters =
-        deviationMapUnits * storeMap.metersPerUnit;
+    final deviationMeters = deviationMapUnits * storeMap.metersPerUnit;
 
     const maxRouteDeviationMeters = 3.0;
 
-    final onRoute =
-        deviationMeters <= maxRouteDeviationMeters;
+    final onRoute = deviationMeters <= maxRouteDeviationMeters;
 
-    final segmentLengthMapUnits =
-    sqrt(segmentLengthSquared);
+    final segmentLengthMapUnits = sqrt(segmentLengthSquared);
 
-    final distanceAlongRouteMapUnits =
-        clampedT * segmentLengthMapUnits;
+    final distanceAlongRouteMapUnits = clampedT * segmentLengthMapUnits;
 
     final distanceAlongRouteMeters =
         distanceAlongRouteMapUnits * storeMap.metersPerUnit;
 
     _log(
       'NAV## ROUTE CHECK '
-          '${current.name} → ${next.name} '
-          'projection=${(clampedT * 100).toStringAsFixed(0)}% '
-          'along=${distanceAlongRouteMeters.toStringAsFixed(2)}m '
-          'deviation=${deviationMeters.toStringAsFixed(2)}m '
-          'onRoute=$onRoute',
+      '${current.name} → ${next.name} '
+      'projection=${(clampedT * 100).toStringAsFixed(0)}% '
+      'along=${distanceAlongRouteMeters.toStringAsFixed(2)}m '
+      'deviation=${deviationMeters.toStringAsFixed(2)}m '
+      'onRoute=$onRoute',
     );
 
     return onRoute;
@@ -4909,7 +4782,6 @@ class NavigationController extends ChangeNotifier {
     );
   }
 
-
   // ---------------------------------------------------------------------------
   // DISPOSE
   // ---------------------------------------------------------------------------
@@ -4928,9 +4800,7 @@ class NavigationController extends ChangeNotifier {
 
     _zoneEnteredController.close();
 
-
-
-    bleScanner.dispose();
+    _observationSource.dispose();
 
     super.dispose();
   }

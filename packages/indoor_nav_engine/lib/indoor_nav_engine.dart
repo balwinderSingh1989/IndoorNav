@@ -1,0 +1,19 @@
+library indoor_nav_engine;
+
+export 'src/ble/ble_scanner_service.dart';
+export 'src/observations/beacon_observation_source.dart';
+export 'src/fingerprints/beacon_fingerprint_controller.dart';
+export 'src/fingerprints/beacon_fingerprint_service.dart';
+export 'src/fingerprints/fingerprint_fusion_selector.dart';
+export 'src/models/beacon_fingerprint.dart';
+export 'src/config/indoor_nav_config.dart';
+export 'src/model/indoor_map.dart';
+export 'src/candidates/free_roam_candidate_policy.dart';
+export 'src/logging/activity_logger.dart';
+export 'src/models/beacon.dart';
+export 'src/models/item.dart';
+export 'src/models/store_map.dart';
+export 'src/motion/motion_service.dart';
+export 'src/navigation/navigation_controller.dart';
+export 'src/positioning/zone_snap_service.dart';
+export 'src/routing/pathfinding_service.dart';

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/product.dart';
-import '../../services/navigation_controller.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../utils/icon_lookup.dart';
 import '../utils/zone_assignment.dart';
 
@@ -14,7 +14,8 @@ import '../utils/zone_assignment.dart';
 /// now, and simply hides itself ([SizedBox.shrink]) when that zone has
 /// nothing on offer.
 class ZoneOffersBanner extends StatelessWidget {
-  const ZoneOffersBanner({super.key, required this.controller, this.catalogOffers = const []});
+  const ZoneOffersBanner(
+      {super.key, required this.controller, this.catalogOffers = const []});
 
   final NavigationController controller;
   final List<Product> catalogOffers;
@@ -24,12 +25,15 @@ class ZoneOffersBanner extends StatelessWidget {
     final zone = controller.currentBeacon;
     if (zone == null) return const SizedBox.shrink();
 
-    final offerItems =
-        controller.storeMap.items.where((i) => i.beaconId == zone.id && i.offer != null).toList();
-    final offerProducts = catalogOffers
-        .where((p) => assignZone(controller.storeMap, p.productCode)?.id == zone.id)
+    final offerItems = controller.storeMap.items
+        .where((i) => i.beaconId == zone.id && i.offer != null)
         .toList();
-    if (offerItems.isEmpty && offerProducts.isEmpty) return const SizedBox.shrink();
+    final offerProducts = catalogOffers
+        .where((p) =>
+            assignZone(controller.storeMap, p.productCode)?.id == zone.id)
+        .toList();
+    if (offerItems.isEmpty && offerProducts.isEmpty)
+      return const SizedBox.shrink();
 
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
@@ -47,7 +51,8 @@ class ZoneOffersBanner extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.local_offer_outlined, size: 18, color: colorScheme.onTertiaryContainer),
+              Icon(Icons.local_offer_outlined,
+                  size: 18, color: colorScheme.onTertiaryContainer),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -69,14 +74,19 @@ class ZoneOffersBanner extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(iconForItem(item.name), size: 16, color: colorScheme.onTertiaryContainer),
+                  Icon(iconForItem(item.name),
+                      size: 16, color: colorScheme.onTertiaryContainer),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text.rich(
                       TextSpan(
-                        style: textTheme.bodySmall?.copyWith(color: colorScheme.onTertiaryContainer),
+                        style: textTheme.bodySmall
+                            ?.copyWith(color: colorScheme.onTertiaryContainer),
                         children: [
-                          TextSpan(text: '${item.name}: ', style: const TextStyle(fontWeight: FontWeight.w700)),
+                          TextSpan(
+                              text: '${item.name}: ',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700)),
                           TextSpan(text: item.offer),
                         ],
                       ),
@@ -91,12 +101,14 @@ class ZoneOffersBanner extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.local_offer_outlined, size: 16, color: colorScheme.onTertiaryContainer),
+                  Icon(Icons.local_offer_outlined,
+                      size: 16, color: colorScheme.onTertiaryContainer),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text.rich(
                       TextSpan(
-                        style: textTheme.bodySmall?.copyWith(color: colorScheme.onTertiaryContainer),
+                        style: textTheme.bodySmall
+                            ?.copyWith(color: colorScheme.onTertiaryContainer),
                         children: [
                           TextSpan(
                             text: '${product.name}: ',

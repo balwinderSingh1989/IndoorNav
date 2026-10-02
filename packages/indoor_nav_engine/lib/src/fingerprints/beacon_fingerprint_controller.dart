@@ -2,12 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../ble/ble_scanner_service.dart';
 import '../models/beacon.dart';
 import '../models/beacon_fingerprint.dart';
+import 'fingerprint_fusion_selector.dart';
 import 'beacon_fingerprint_service.dart';
-import 'ble_scanner_service.dart';
 
-/// Coordinates beacon-zone fingerprint capture and live quality feedback.
+/// Coordinates fingerprint capture and live quality evaluation.
 class BeaconFingerprintController extends ChangeNotifier {
   BeaconFingerprintController(
     this._fingerprintService,
@@ -37,17 +38,74 @@ class BeaconFingerprintController extends ChangeNotifier {
   String get statusMessage => _statusMessage;
   List<Beacon> get beacons => _beacons;
   Beacon? get selectedBeacon => _selectedBeacon;
-  List<BeaconReading> get currentReadings => List.unmodifiable(_currentReadings);
-  Map<BeaconDistanceAlgorithm, FingerprintQuality> get liveQuality => _liveQuality;
-  BeaconDistanceAlgorithm get currentAlgorithm => _fingerprintService.currentAlgorithm;
-  Map<String, BeaconZoneFingerprint> get zones => _fingerprintService.fingerprints;
+  List<BeaconReading> get currentReadings =>
+      List.unmodifiable(_currentReadings);
+  Map<BeaconDistanceAlgorithm, FingerprintQuality> get liveQuality =>
+      _liveQuality;
+  BeaconDistanceAlgorithm get currentAlgorithm =>
+      _fingerprintService.currentAlgorithm;
+  Map<String, BeaconZoneFingerprint> get zones =>
+      _fingerprintService.fingerprints;
 
+  Map<BeaconDistanceAlgorithm, DistanceResult?> get bestMatchesByAlgorithm {
+    if (_currentReadings.isEmpty || zones.isEmpty) return const {};
+    return {
+      for (final algorithm in BeaconDistanceAlgorithm.values)
+        algorithm: _bestMatchFor(algorithm),
+    };
+  }
+
+  FingerprintFusionCandidate? get fusionCandidate {
+    final results = bestMatchesByAlgorithm;
+    if (results.isEmpty) return null;
+    return aggregateFingerprintCandidates(
+      results: results,
+      confidences: {
+        for (final entry in results.entries)
+          entry.key: entry.value == null
+              ? null
+              : _fingerprintService.confidenceFor(entry.value!),
+      },
+      passesThreshold: {
+        for (final entry in results.entries)
+          entry.key:
+              entry.value != null && _passesThreshold(entry.value!, entry.key),
+      },
+    );
+  }
+
+  DistanceResult? get bestMatch {
+    if (_currentReadings.isEmpty || zones.isEmpty) return null;
+    final results = _fingerprintService.evaluate(
+      _currentReadings,
+      _fingerprintService.currentAlgorithm,
+    );
+    return results.isEmpty ? null : results.first;
+  }
+
+  double? get bestConfidence {
+    final result = bestMatch;
+    return result == null ? null : _fingerprintService.confidenceFor(result);
+  }
+
+  bool get bestPassesThreshold {
+    final result = bestMatch;
+    return result != null && _passesThreshold(result, currentAlgorithm);
+  }
+
+  bool passesThresholdFor(
+    DistanceResult result,
+    BeaconDistanceAlgorithm algorithm,
+  ) =>
+      _passesThreshold(result, algorithm);
   Future<void> init() async {
     await _fingerprintService.loadFingerprints();
     _currentReadings = _toReadings(_bleScanner.latestScanInfo);
     _scanSubscription = _bleScanner.scanInfoStream.listen(_onScanInfo);
     _refreshLiveQuality();
-    _setStatus(_beacons.isEmpty ? 'No configured beacons' : 'Select the beacon for this zone');
+    _setStatus(_beacons.isEmpty
+        ? 'No configured beacons'
+        : 'Select the beacon for this zone');
     notifyListeners();
   }
 
@@ -61,6 +119,7 @@ class BeaconFingerprintController extends ChangeNotifier {
 
   void switchAlgorithm(BeaconDistanceAlgorithm algorithm) {
     _fingerprintService.setAlgorithm(algorithm);
+    _refreshLiveQuality();
     notifyListeners();
   }
 
@@ -78,13 +137,14 @@ class BeaconFingerprintController extends ChangeNotifier {
     final totalTicks = captureDuration * 10;
     for (var tickIndex = 0; tickIndex < totalTicks; tickIndex++) {
       await Future<void>.delayed(tick);
-      _captureProgress = ((tickIndex + 1) * 100 ~/ totalTicks);
+      _captureProgress = (tickIndex + 1) * 100 ~/ totalTicks;
       notifyListeners();
     }
 
     try {
       if (_captureReadings.isEmpty) {
-        _setStatus('No BLE readings received. Start BLE scanning and try again.');
+        _setStatus(
+            'No BLE readings received. Start BLE scanning and try again.');
         return;
       }
       await _fingerprintService.captureZoneFingerprint(
@@ -92,7 +152,9 @@ class BeaconFingerprintController extends ChangeNotifier {
         beaconReadings: _captureReadings,
       );
       _refreshLiveQuality();
-      _setStatus('Saved ${selectedBeacon.name}. A red dot means the live pattern matches this zone.');
+      _setStatus(
+        'Saved ${selectedBeacon.name}. A red dot means the live pattern matches this zone.',
+      );
     } finally {
       _isCapturing = false;
       notifyListeners();
@@ -108,12 +170,10 @@ class BeaconFingerprintController extends ChangeNotifier {
     notifyListeners();
   }
 
-  List<BeaconReading> _toReadings(List<BeaconScanInfo> scanInfo) {
-    return [
-      for (final info in scanInfo)
-        if (_parseReading(info) case final reading?) reading,
-    ];
-  }
+  List<BeaconReading> _toReadings(List<BeaconScanInfo> scanInfo) => [
+        for (final info in scanInfo)
+          if (_parseReading(info) case final reading?) reading,
+      ];
 
   BeaconReading? _parseReading(BeaconScanInfo info) {
     final parts = info.key.split(':');
@@ -131,7 +191,9 @@ class BeaconFingerprintController extends ChangeNotifier {
 
   void _refreshLiveQuality() {
     final selectedBeacon = _selectedBeacon;
-    if (selectedBeacon == null || _currentReadings.isEmpty || !zones.containsKey(selectedBeacon.id)) {
+    if (selectedBeacon == null ||
+        _currentReadings.isEmpty ||
+        !zones.containsKey(selectedBeacon.id)) {
       _liveQuality = const {};
       return;
     }
@@ -139,19 +201,23 @@ class BeaconFingerprintController extends ChangeNotifier {
     final quality = <BeaconDistanceAlgorithm, FingerprintQuality>{};
     for (final algorithm in BeaconDistanceAlgorithm.values) {
       final results = _fingerprintService.evaluate(_currentReadings, algorithm);
-      final expected = results.where((result) => result.zoneName == selectedBeacon.id).firstOrNull;
+      final expected = results
+          .where((result) => result.zoneName == selectedBeacon.id)
+          .firstOrNull;
       final best = results.isEmpty ? null : results.first;
       quality[algorithm] = FingerprintQuality(
         algorithm: algorithm,
         result: expected,
         matchesSelectedZone: best?.zoneName == selectedBeacon.id,
-        passesThreshold: expected != null && _passesThreshold(expected, algorithm),
+        passesThreshold:
+            expected != null && _passesThreshold(expected, algorithm),
       );
     }
     _liveQuality = quality;
   }
 
-  bool _passesThreshold(DistanceResult result, BeaconDistanceAlgorithm algorithm) {
+  bool _passesThreshold(
+      DistanceResult result, BeaconDistanceAlgorithm algorithm) {
     switch (algorithm) {
       case BeaconDistanceAlgorithm.euclidean:
         return result.distance <= _fingerprintService.euclideanThreshold;
@@ -160,6 +226,11 @@ class BeaconFingerprintController extends ChangeNotifier {
       case BeaconDistanceAlgorithm.timeSeries:
         return result.distance >= _fingerprintService.correlationThreshold;
     }
+  }
+
+  DistanceResult? _bestMatchFor(BeaconDistanceAlgorithm algorithm) {
+    final results = _fingerprintService.evaluate(_currentReadings, algorithm);
+    return results.isEmpty ? null : results.first;
   }
 
   void _setStatus(String message) => _statusMessage = message;

@@ -1,9 +1,9 @@
-/// Represents a single beacon's fingerprint data in a zone
+/// Represents a single beacon's fingerprint data in a zone.
 class BeaconSignature {
   final String uuid;
   final int major;
   final int minor;
-  final List<int> rssiReadings; // Raw RSSI values in dBm
+  final List<int> rssiReadings;
 
   BeaconSignature({
     required this.uuid,
@@ -12,53 +12,50 @@ class BeaconSignature {
     required this.rssiReadings,
   });
 
-  /// Calculate mean RSSI
-  double get meanRssi {
-    if (rssiReadings.isEmpty) return 0;
-    return rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
-  }
+  double get meanRssi => rssiReadings.isEmpty
+      ? 0
+      : rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
 
-  /// Calculate standard deviation of RSSI
   double get stdDevRssi {
     if (rssiReadings.isEmpty) return 0;
-    double mean = meanRssi;
-    final variance =
-        rssiReadings.map((r) => (r - mean) * (r - mean)).reduce((a, b) => a + b) /
-            rssiReadings.length;
+    final mean = meanRssi;
+    final variance = rssiReadings
+            .map((r) => (r - mean) * (r - mean))
+            .reduce((a, b) => a + b) /
+        rssiReadings.length;
     return variance.isNaN ? 0 : variance.sqrt();
   }
 
-  /// Get min/max RSSI
-  int get minRssi => rssiReadings.isEmpty ? 0 : rssiReadings.reduce((a, b) => a < b ? a : b);
-  int get maxRssi => rssiReadings.isEmpty ? 0 : rssiReadings.reduce((a, b) => a > b ? a : b);
+  int get minRssi =>
+      rssiReadings.isEmpty ? 0 : rssiReadings.reduce((a, b) => a < b ? a : b);
 
-  /// Beacon identifier
+  int get maxRssi =>
+      rssiReadings.isEmpty ? 0 : rssiReadings.reduce((a, b) => a > b ? a : b);
+
   String get beaconId => '$uuid:$major:$minor';
 
-  toJson() => {
-    'uuid': uuid,
-    'major': major,
-    'minor': minor,
-    'rssiReadings': rssiReadings,
-    'meanRssi': meanRssi,
-    'stdDevRssi': stdDevRssi,
-  };
+  Map<String, dynamic> toJson() => {
+        'uuid': uuid,
+        'major': major,
+        'minor': minor,
+        'rssiReadings': rssiReadings,
+        'meanRssi': meanRssi,
+        'stdDevRssi': stdDevRssi,
+      };
 
-  factory BeaconSignature.fromJson(Map<String, dynamic> json) {
-    return BeaconSignature(
-      uuid: json['uuid'],
-      major: json['major'],
-      minor: json['minor'],
-      rssiReadings: List<int>.from(json['rssiReadings'] ?? []),
-    );
-  }
+  factory BeaconSignature.fromJson(Map<String, dynamic> json) =>
+      BeaconSignature(
+        uuid: json['uuid'] as String,
+        major: (json['major'] as num).toInt(),
+        minor: (json['minor'] as num).toInt(),
+        rssiReadings: List<int>.from(json['rssiReadings'] ?? const []),
+      );
 }
 
-/// Zone fingerprint: collection of beacon signatures in a zone
 class BeaconZoneFingerprint {
   final String zoneName;
   final DateTime capturedAt;
-  final Map<String, BeaconSignature> beaconSignatures; // Key: beacon ID
+  final Map<String, BeaconSignature> beaconSignatures;
 
   BeaconZoneFingerprint({
     required this.zoneName,
@@ -66,25 +63,29 @@ class BeaconZoneFingerprint {
     DateTime? capturedAt,
   }) : capturedAt = capturedAt ?? DateTime.now();
 
-  toJson() => {
-    'zoneName': zoneName,
-    'capturedAt': capturedAt.toIso8601String(),
-    'beaconSignatures': beaconSignatures.map((k, v) => MapEntry(k, v.toJson())),
-  };
+  Map<String, dynamic> toJson() => {
+        'zoneName': zoneName,
+        'capturedAt': capturedAt.toIso8601String(),
+        'beaconSignatures': beaconSignatures.map(
+          (key, value) => MapEntry(key, value.toJson()),
+        ),
+      };
 
   factory BeaconZoneFingerprint.fromJson(Map<String, dynamic> json) {
-    final signatures = (json['beaconSignatures'] as Map<String, dynamic>)
-        .map((k, v) => MapEntry(k, BeaconSignature.fromJson(v)));
-    
+    final signatures = (json['beaconSignatures'] as Map<String, dynamic>).map(
+      (key, value) => MapEntry(
+        key,
+        BeaconSignature.fromJson(value as Map<String, dynamic>),
+      ),
+    );
     return BeaconZoneFingerprint(
-      zoneName: json['zoneName'],
+      zoneName: json['zoneName'] as String,
       beaconSignatures: signatures,
-      capturedAt: DateTime.parse(json['capturedAt']),
+      capturedAt: DateTime.parse(json['capturedAt'] as String),
     );
   }
 }
 
-/// Distance calculation result
 class DistanceResult {
   final String zoneName;
   final double distance;
@@ -103,7 +104,6 @@ class DistanceResult {
       'Zone: $zoneName, Distance: ${distance.toStringAsFixed(2)}, Algorithm: $algorithm, Beacons: $matchedBeaconCount';
 }
 
-/// Quality of the currently scanned beacon pattern against a selected zone.
 class FingerprintQuality {
   const FingerprintQuality({
     required this.algorithm,
@@ -117,15 +117,11 @@ class FingerprintQuality {
   final bool matchesSelectedZone;
   final bool passesThreshold;
 
-  bool get isSuccessful => result != null && matchesSelectedZone && passesThreshold;
+  bool get isSuccessful =>
+      result != null && matchesSelectedZone && passesThreshold;
 }
 
-/// Enum for distance calculation methods
-enum BeaconDistanceAlgorithm {
-  euclidean,
-  mahalanobis,
-  timeSeries,
-}
+enum BeaconDistanceAlgorithm { euclidean, mahalanobis, timeSeries }
 
 extension on double {
   double sqrt() {
@@ -160,4 +156,23 @@ extension BeaconAlgorithmExt on BeaconDistanceAlgorithm {
         return 'Pattern-based matching';
     }
   }
+}
+
+class BeaconReading {
+  final String uuid;
+  final int major;
+  final int minor;
+  final int rssi;
+  final DateTime timestamp;
+
+  BeaconReading({
+    required this.uuid,
+    required this.major,
+    required this.minor,
+    required this.rssi,
+    DateTime? timestamp,
+  }) : timestamp = timestamp ?? DateTime.now();
+
+  @override
+  String toString() => 'Beacon($uuid:$major:$minor) RSSI:$rssi dBm';
 }

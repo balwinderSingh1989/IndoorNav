@@ -32,6 +32,12 @@
 	<string>This app scans for nearby BLE beacons to determine which aisle/zone you're in for indoor navigation.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>This app counts your steps to track your position on the map between beacon updates.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app uses location services to detect nearby iBeacon zones for indoor navigation.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../models/product.dart';
-import '../../models/store_map.dart';
-import '../../services/navigation_controller.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import 'map_painter.dart';
 import 'zone_offers_banner.dart';
 
@@ -13,7 +12,8 @@ import 'zone_offers_banner.dart';
 /// dedicated full-screen view reached after picking a destination), so the
 /// two never drift out of sync with each other.
 class LiveNavigationCard extends StatelessWidget {
-  const LiveNavigationCard({super.key, required this.controller, this.catalogOffers = const []});
+  const LiveNavigationCard(
+      {super.key, required this.controller, this.catalogOffers = const []});
 
   final NavigationController controller;
 
@@ -33,7 +33,8 @@ class LiveNavigationCard extends StatelessWidget {
             _StatusCard(controller: controller),
             const SizedBox(height: 12),
             _MapFrame(controller: controller, storeMap: storeMap),
-            ZoneOffersBanner(controller: controller, catalogOffers: catalogOffers),
+            ZoneOffersBanner(
+                controller: controller, catalogOffers: catalogOffers),
             _DirectionsList(controller: controller),
           ],
         );
@@ -64,8 +65,8 @@ class _StatusCard extends StatelessWidget {
     };
     final stride = controller.calibratedStepLengthMeters;
     final strideLabel = controller.strideCalibrationSampleCount == 0
-      ? 'default'
-      : '${controller.strideCalibrationSampleCount} samples';
+        ? 'default'
+        : '${controller.strideCalibrationSampleCount} samples';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -79,18 +80,23 @@ class _StatusCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              _LocationConfidenceIndicator(hasFix: hasFix, confidence: confidence),
+              _LocationConfidenceIndicator(
+                  hasFix: hasFix, confidence: confidence),
               const SizedBox(width: 8),
               Expanded(
                 child: Text.rich(
                   TextSpan(
                     children: [
                       if (hasFix)
-                        TextSpan(text: 'You are near  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
+                        TextSpan(
+                            text: 'You are near  ',
+                            style: textTheme.bodySmall?.copyWith(
+                                color: colorScheme.onSurfaceVariant)),
                       TextSpan(
                         text: here,
                         style: hasFix
-                            ? textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)
+                            ? textTheme.bodyMedium
+                                ?.copyWith(fontWeight: FontWeight.w600)
                             : textTheme.bodyMedium?.copyWith(
                                 fontStyle: FontStyle.italic,
                                 color: colorScheme.onSurfaceVariant,
@@ -121,10 +127,14 @@ class _StatusCard extends StatelessWidget {
                 child: Text.rich(
                   TextSpan(
                     children: [
-                      TextSpan(text: 'Going to  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
+                      TextSpan(
+                          text: 'Going to  ',
+                          style: textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant)),
                       TextSpan(
                         text: there ?? 'Pick a destination',
-                        style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                        style: textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -143,10 +153,15 @@ class _StatusCard extends StatelessWidget {
                 Text.rich(
                   TextSpan(
                     children: [
-                      TextSpan(text: 'Distance  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
                       TextSpan(
-                        text: _formatDistance(controller.currentDistanceMeters!),
-                        style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                          text: 'Distance  ',
+                          style: textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant)),
+                      TextSpan(
+                        text:
+                            _formatDistance(controller.currentDistanceMeters!),
+                        style: textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -158,19 +173,27 @@ class _StatusCard extends StatelessWidget {
             const SizedBox(height: 6),
             Row(
               children: [
-                Icon(Icons.navigation_outlined, size: 16, color: colorScheme.primary),
+                Icon(Icons.navigation_outlined,
+                    size: 16, color: colorScheme.primary),
                 const SizedBox(width: 8),
-                Text(status, style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+                Text(status,
+                    style: textTheme.bodySmall
+                        ?.copyWith(fontWeight: FontWeight.w600)),
               ],
             ),
           ],
           const SizedBox(height: 6),
           Row(
             children: [
-              Icon(Icons.directions_walk, size: 16, color: colorScheme.tertiary),
+              Icon(Icons.directions_walk,
+                  size: 16, color: colorScheme.tertiary),
               const SizedBox(width: 8),
-              Text('Step distance  ', style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
-              Text('${stride.toStringAsFixed(2)} m ($strideLabel)', style: textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+              Text('Step distance  ',
+                  style: textTheme.bodySmall
+                      ?.copyWith(color: colorScheme.onSurfaceVariant)),
+              Text('${stride.toStringAsFixed(2)} m ($strideLabel)',
+                  style: textTheme.bodySmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
             ],
           ),
         ],
@@ -189,23 +212,28 @@ class _StatusCard extends StatelessWidget {
 /// dot before any fix at all, so a later flip doesn't read as the app
 /// having been "wrong" about a name it never confidently committed to.
 class _LocationConfidenceIndicator extends StatefulWidget {
-  const _LocationConfidenceIndicator({required this.hasFix, required this.confidence});
+  const _LocationConfidenceIndicator(
+      {required this.hasFix, required this.confidence});
 
   final bool hasFix;
   final double confidence;
 
   @override
-  State<_LocationConfidenceIndicator> createState() => _LocationConfidenceIndicatorState();
+  State<_LocationConfidenceIndicator> createState() =>
+      _LocationConfidenceIndicatorState();
 }
 
-class _LocationConfidenceIndicatorState extends State<_LocationConfidenceIndicator>
+class _LocationConfidenceIndicatorState
+    extends State<_LocationConfidenceIndicator>
     with SingleTickerProviderStateMixin {
   late final AnimationController _pulse;
 
   @override
   void initState() {
     super.initState();
-    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+    _pulse = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900))
+      ..repeat(reverse: true);
   }
 
   @override
@@ -221,7 +249,8 @@ class _LocationConfidenceIndicatorState extends State<_LocationConfidenceIndicat
     if (!widget.hasFix) {
       return FadeTransition(
         opacity: Tween(begin: 0.35, end: 1.0).animate(_pulse),
-        child: Icon(Icons.location_searching, size: 16, color: colorScheme.primary),
+        child: Icon(Icons.location_searching,
+            size: 16, color: colorScheme.primary),
       );
     }
 
@@ -269,7 +298,8 @@ class _MapFrame extends StatefulWidget {
   State<_MapFrame> createState() => _MapFrameState();
 }
 
-class _MapFrameState extends State<_MapFrame> with SingleTickerProviderStateMixin {
+class _MapFrameState extends State<_MapFrame>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _positionAnim;
   Offset? _animFrom;
   Offset? _animTo;
@@ -281,7 +311,8 @@ class _MapFrameState extends State<_MapFrame> with SingleTickerProviderStateMixi
     // updates continuously (~every 50ms) rather than in one lump per
     // detected step, so a long ease here would just stack lag on top of
     // lag instead of smoothing anything.
-    _positionAnim = AnimationController(vsync: this, duration: const Duration(milliseconds: 15))
+    _positionAnim = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 15))
       ..addListener(() => setState(() {}));
     _animTo = widget.controller.liveUserPosition;
     widget.controller.addListener(_onControllerChanged);
@@ -297,7 +328,8 @@ class _MapFrameState extends State<_MapFrame> with SingleTickerProviderStateMixi
 
   Offset? get _currentPosition {
     if (_animFrom == null || _animTo == null) return _animTo;
-    return Offset.lerp(_animFrom, _animTo, Curves.easeOut.transform(_positionAnim.value));
+    return Offset.lerp(
+        _animFrom, _animTo, Curves.easeOut.transform(_positionAnim.value));
   }
 
   @override
@@ -334,7 +366,8 @@ class _MapFrameState extends State<_MapFrame> with SingleTickerProviderStateMixi
             SvgPicture.asset(
               storeMap.mapAsset,
               fit: BoxFit.contain,
-              placeholderBuilder: (context) => const Center(child: CircularProgressIndicator()),
+              placeholderBuilder: (context) =>
+                  const Center(child: CircularProgressIndicator()),
               errorBuilder: (context, error, stackTrace) => Center(
                 child: Padding(
                   padding: const EdgeInsets.all(16),

@@ -3,16 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../../models/beacon.dart';
 import '../../models/product.dart';
 import '../../models/product_category.dart';
-import '../../services/activity_logger.dart';
 import '../../services/analytics_service.dart';
-import '../../services/beacon_fingerprint_controller.dart';
-import '../../services/beacon_fingerprint_service.dart';
-import '../../services/ble_scanner_service.dart';
 import '../../services/catalog_api_service.dart';
-import '../../services/navigation_controller.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../utils/icon_lookup.dart';
 import '../utils/zone_assignment.dart';
 import '../widgets/live_navigation_card.dart';
@@ -58,6 +53,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Object? _categoriesError;
   List<Product> _offerProducts = const [];
   bool _motionPermissionDialogVisible = false;
+  final _homeFingerprintService = BeaconFingerprintService();
+  late final BeaconFingerprintController _homeFingerprintController;
+  final _fingerprintFusionSelector = FingerprintFusionSelector();
+  String? _confirmedFingerprintZoneId;
 
   @override
   void initState() {
@@ -68,10 +67,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // for the app's whole lifetime, not just while the map screen happens
     // to be the visible route.
     widget.controller.start();
-    _scanErrorSub = widget.controller.bleScanner.errors.listen((message) {
+    _scanErrorSub = widget.bleScanner.errors.listen((message) {
       _activityLogger.log('BLE error: $message');
       _showError(message);
     });
+    _homeFingerprintController = BeaconFingerprintController(
+      _homeFingerprintService,
+      widget.bleScanner,
+      widget.controller.storeMap.beacons,
+    )..addListener(_onFingerprintControllerChanged);
+    _homeFingerprintController.init();
     _motionErrorSub = widget.controller.motionService.errors.listen((message) {
       _activityLogger.log('Motion error: $message');
       if (message.startsWith('Motion permission denied')) {
@@ -80,15 +85,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       _showError(message);
     });
-    _zoneEnteredSub = widget.controller.zoneEnteredStream.listen(_onZoneEntered);
+    _zoneEnteredSub =
+        widget.controller.zoneEnteredStream.listen(_onZoneEntered);
     // zoneEnteredStream fires once per *confirmed* zone change (debounced
     // upstream in NavigationController) — the same signal drives both the
     // dwell-time analytics file and the general activity log, so "time
+
     // spent per zone" and "what happened when" both start counting from
     // app launch, not from whenever a destination happens to be picked.
     _analytics.start(widget.controller.zoneEnteredStream);
     _activityLogger.log('App started');
     _loadCategories();
+  }
+
+  void _onFingerprintControllerChanged() {
+    final candidate = _homeFingerprintController.fusionCandidate;
+    final committed = _fingerprintFusionSelector.update(candidate);
+    if (committed != null) _confirmedFingerprintZoneId = committed;
+    if (mounted) setState(() {});
   }
 
   @override
@@ -98,7 +112,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // like a fresh start, not resume a stale destination/path from
     // whatever the user was doing before. BLE/PDR tracking itself keeps
     // running regardless; only the chosen destination/route resets.
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
       widget.controller.clearDestination();
       // Close out whatever zone visit is in progress rather than losing it
       // — there's no further zoneEnteredStream event coming if the app
@@ -157,6 +172,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _scanErrorSub?.cancel();
+    _homeFingerprintController
+      ..removeListener(_onFingerprintControllerChanged)
+      ..dispose();
     _motionErrorSub?.cancel();
     _zoneEnteredSub?.cancel();
     _analytics.dispose();
@@ -198,7 +216,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // Arrivals that aren't necessarily discounted — the zone banner is
       // specifically about savings, so only keep products with a real
       // markdown.
-      setState(() => _offerProducts = products.where((p) => p.isOnSale).toList());
+      setState(
+          () => _offerProducts = products.where((p) => p.isOnSale).toList());
     } catch (_) {
       // Best-effort: the zone offers banner simply stays empty if this fails.
     }
@@ -221,7 +240,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _activityLogger.log('Destination set: ${product.name} (${beacon.id})');
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => NavigationScreen(controller: widget.controller, catalogOffers: _offerProducts),
+        builder: (_) => NavigationScreen(
+            controller: widget.controller, catalogOffers: _offerProducts),
       ),
     );
   }
@@ -231,7 +251,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _activityLogger.log('Destination set: zone (${beacon.id})');
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => NavigationScreen(controller: widget.controller, catalogOffers: _offerProducts),
+        builder: (_) => NavigationScreen(
+            controller: widget.controller, catalogOffers: _offerProducts),
       ),
     );
   }
@@ -239,7 +260,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _openLogs() {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => LogsScreen(activityLogger: _activityLogger, analytics: _analytics),
+        builder: (_) =>
+            LogsScreen(activityLogger: _activityLogger, analytics: _analytics),
       ),
     );
   }
@@ -249,26 +271,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       MaterialPageRoute(
         builder: (_) => BeaconSettingsScreen(
           storeMap: widget.controller.storeMap,
-          bleScanner: widget.controller.bleScanner,
+          bleScanner: widget.bleScanner,
         ),
       ),
     );
   }
 
-  // void _openMlDataCollection() {
-  //   Navigator.of(context).push(
-  //     MaterialPageRoute(
-  //       builder: (_) => MlDataCollectionScreen(
-  //         storeMap: widget.controller.storeMap,
-  //         bleScanner: widget.controller.bleScanner,
-  //       ),
-  //     ),
-  //   );
-  // }
-
   void _openBeaconFingerprinting() {
     final fpController = BeaconFingerprintController(
-      BeaconFingerprintService(),
+      _homeFingerprintService,
       widget.bleScanner,
       widget.controller.storeMap.beacons,
     );
@@ -328,20 +339,114 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
           children: [
             _SearchBar(onTap: _openSearch),
+            const SizedBox(height: 12),
+            _buildFingerprintStatus(colorScheme, textTheme),
             const SizedBox(height: 28),
             const SectionHeader(icon: Icons.map_outlined, label: 'Live map'),
             const SizedBox(height: 12),
-            LiveNavigationCard(controller: widget.controller, catalogOffers: _offerProducts),
+            LiveNavigationCard(
+                controller: widget.controller, catalogOffers: _offerProducts),
             const SizedBox(height: 28),
             const SectionHeader(icon: Icons.pin_drop_outlined, label: 'Zones'),
             const SizedBox(height: 12),
             _buildZonesSection(colorScheme, textTheme),
             const SizedBox(height: 28),
-            const SectionHeader(icon: Icons.category_outlined, label: 'Categories'),
+            const SectionHeader(
+                icon: Icons.category_outlined, label: 'Categories'),
             const SizedBox(height: 12),
             _buildCategoriesSection(colorScheme, textTheme),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildFingerprintStatus(ColorScheme colorScheme, TextTheme textTheme) {
+    final matches = _homeFingerprintController.bestMatchesByAlgorithm;
+    if (matches.isEmpty) {
+      return Card(
+        child: ListTile(
+          dense: true,
+          leading: Icon(Icons.radar, color: colorScheme.onSurfaceVariant),
+          title: const Text('Fingerprint zone: waiting for a match'),
+          subtitle: const Text(
+              'Capture zone fingerprints to enable this test signal.'),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          children: [
+            const ListTile(
+              dense: true,
+              leading: Icon(Icons.radar),
+              title: Text('Fingerprint zone detection'),
+              subtitle:
+                  Text('All algorithms evaluated from the live fingerprint.'),
+            ),
+            if (_confirmedFingerprintZoneId != null)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.verified, color: Colors.green),
+                title: Text(
+                  'Confirmed: ${widget.controller.storeMap.beaconById(_confirmedFingerprintZoneId!)?.name ?? _confirmedFingerprintZoneId}',
+                ),
+                subtitle: Text(
+                  'Stable fingerprint candidate after hysteresis',
+                  style: textTheme.bodySmall,
+                ),
+              ),
+            for (final algorithm in BeaconDistanceAlgorithm.values)
+              _buildFingerprintAlgorithmRow(
+                algorithm,
+                matches[algorithm],
+                colorScheme,
+                textTheme,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFingerprintAlgorithmRow(
+    BeaconDistanceAlgorithm algorithm,
+    DistanceResult? match,
+    ColorScheme colorScheme,
+    TextTheme textTheme,
+  ) {
+    if (match == null) {
+      return ListTile(
+        dense: true,
+        leading: Icon(Icons.circle, size: 12, color: colorScheme.outline),
+        title: Text(algorithm.displayName),
+        subtitle: const Text('Waiting for enough fingerprint readings.'),
+      );
+    }
+
+    final beacon = widget.controller.storeMap.beaconById(match.zoneName);
+    final confidence =
+        (_homeFingerprintService.confidenceFor(match) * 100).round();
+    final passesThreshold = _homeFingerprintController.passesThresholdFor(
+      match,
+      algorithm,
+    );
+    return ListTile(
+      dense: true,
+      leading: Icon(
+        Icons.circle,
+        size: 12,
+        color: passesThreshold ? Colors.red : colorScheme.outline,
+      ),
+      title:
+          Text('${algorithm.displayName}: ${beacon?.name ?? match.zoneName}'),
+      subtitle: Text(
+        '$confidence% confidence · ${match.matchedBeaconCount} beacons matched · '
+        '${passesThreshold ? 'threshold passed' : 'below threshold'}',
+        style: textTheme.bodySmall,
       ),
     );
   }
@@ -357,10 +462,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               Text(
                 '$_categoriesError',
                 textAlign: TextAlign.center,
-                style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+                style: textTheme.bodyMedium
+                    ?.copyWith(color: colorScheme.onSurfaceVariant),
               ),
               const SizedBox(height: 12),
-              FilledButton(onPressed: _loadCategories, child: const Text('Retry')),
+              FilledButton(
+                  onPressed: _loadCategories, child: const Text('Retry')),
             ],
           ),
         ),
@@ -379,7 +486,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Center(
           child: Text(
             'No categories yet',
-            style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+            style: textTheme.bodyMedium
+                ?.copyWith(color: colorScheme.onSurfaceVariant),
           ),
         ),
       );
@@ -395,7 +503,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Center(
           child: Text(
             'No zones yet',
-            style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+            style: textTheme.bodyMedium
+                ?.copyWith(color: colorScheme.onSurfaceVariant),
           ),
         ),
       );
@@ -426,7 +535,8 @@ class _SearchBar extends StatelessWidget {
               const SizedBox(width: 12),
               Text(
                 'Search for a product…',
-                style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 15),
+                style: TextStyle(
+                    color: colorScheme.onSurfaceVariant, fontSize: 15),
               ),
             ],
           ),
@@ -449,10 +559,22 @@ class _CategoryGrid extends StatelessWidget {
     // theme-derived tonal pairs, so they stay legible/on-brand in both
     // light and dark mode without any hardcoded colors.
     final accents = [
-      (background: colorScheme.primaryContainer, foreground: colorScheme.onPrimaryContainer),
-      (background: colorScheme.secondaryContainer, foreground: colorScheme.onSecondaryContainer),
-      (background: colorScheme.tertiaryContainer, foreground: colorScheme.onTertiaryContainer),
-      (background: colorScheme.errorContainer, foreground: colorScheme.onErrorContainer),
+      (
+        background: colorScheme.primaryContainer,
+        foreground: colorScheme.onPrimaryContainer
+      ),
+      (
+        background: colorScheme.secondaryContainer,
+        foreground: colorScheme.onSecondaryContainer
+      ),
+      (
+        background: colorScheme.tertiaryContainer,
+        foreground: colorScheme.onTertiaryContainer
+      ),
+      (
+        background: colorScheme.errorContainer,
+        foreground: colorScheme.onErrorContainer
+      ),
     ];
 
     return GridView.builder(
@@ -516,14 +638,16 @@ class _CategoryCard extends StatelessWidget {
                   color: foreground.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: Icon(iconForCategory(category.name), size: 24, color: foreground),
+                child: Icon(iconForCategory(category.name),
+                    size: 24, color: foreground),
               ),
               const Spacer(),
               Text(
                 category.name,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: textTheme.titleSmall?.copyWith(color: foreground, fontWeight: FontWeight.w700),
+                style: textTheme.titleSmall
+                    ?.copyWith(color: foreground, fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 2),
               // Not a product count: get-category-tree's declared
@@ -533,7 +657,8 @@ class _CategoryCard extends StatelessWidget {
               // number here would just be showing wrong information.
               Text(
                 'Browse products',
-                style: textTheme.bodySmall?.copyWith(color: foreground.withValues(alpha: 0.75)),
+                style: textTheme.bodySmall
+                    ?.copyWith(color: foreground.withValues(alpha: 0.75)),
               ),
             ],
           ),
@@ -555,10 +680,22 @@ class _ZoneGrid extends StatelessWidget {
     // Same theme-derived tonal pairs as the category grid, cycled purely
     // for visual variety.
     final accents = [
-      (background: colorScheme.primaryContainer, foreground: colorScheme.onPrimaryContainer),
-      (background: colorScheme.secondaryContainer, foreground: colorScheme.onSecondaryContainer),
-      (background: colorScheme.tertiaryContainer, foreground: colorScheme.onTertiaryContainer),
-      (background: colorScheme.errorContainer, foreground: colorScheme.onErrorContainer),
+      (
+        background: colorScheme.primaryContainer,
+        foreground: colorScheme.onPrimaryContainer
+      ),
+      (
+        background: colorScheme.secondaryContainer,
+        foreground: colorScheme.onSecondaryContainer
+      ),
+      (
+        background: colorScheme.tertiaryContainer,
+        foreground: colorScheme.onTertiaryContainer
+      ),
+      (
+        background: colorScheme.errorContainer,
+        foreground: colorScheme.onErrorContainer
+      ),
     ];
 
     return GridView.builder(
@@ -629,12 +766,14 @@ class _ZoneCard extends StatelessWidget {
                 zone.name,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: textTheme.titleSmall?.copyWith(color: foreground, fontWeight: FontWeight.w700),
+                style: textTheme.titleSmall
+                    ?.copyWith(color: foreground, fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 2),
               Text(
                 'Navigate here',
-                style: textTheme.bodySmall?.copyWith(color: foreground.withValues(alpha: 0.75)),
+                style: textTheme.bodySmall
+                    ?.copyWith(color: foreground.withValues(alpha: 0.75)),
               ),
             ],
           ),

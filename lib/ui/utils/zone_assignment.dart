@@ -1,5 +1,4 @@
-import '../../models/beacon.dart';
-import '../../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 /// Beacon names that aren't real browsable areas of the store (an interim
 /// staging beacon and an internal seating placeholder) — excluded from both
@@ -8,8 +7,9 @@ const _excludedZoneNames = {'Interim', 'Seating 2-A'};
 
 /// Every configured beacon that's a valid navigation destination, i.e. all
 /// beacons except [_excludedZoneNames].
-List<Beacon> navigableBeacons(StoreMap storeMap) =>
-    storeMap.beacons.where((b) => !_excludedZoneNames.contains(b.name)).toList();
+List<Beacon> navigableBeacons(StoreMap storeMap) => storeMap.beacons
+    .where((b) => !_excludedZoneNames.contains(b.name))
+    .toList();
 
 /// The Ace Hardware catalog API has no concept of this app's beacon/aisle
 /// graph, so every product needs *some* zone to navigate to. Rather than

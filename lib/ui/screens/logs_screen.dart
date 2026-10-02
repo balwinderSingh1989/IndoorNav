@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../services/activity_logger.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../../services/analytics_service.dart';
 
 enum _LogsView { analytics, activity }
@@ -11,7 +11,8 @@ enum _LogsView { analytics, activity }
 /// passed in rather than re-instantiated, so this reads the exact same
 /// files the rest of the app is actively writing to.
 class LogsScreen extends StatefulWidget {
-  const LogsScreen({super.key, required this.activityLogger, required this.analytics});
+  const LogsScreen(
+      {super.key, required this.activityLogger, required this.analytics});
 
   final ActivityLogger activityLogger;
   final AnalyticsService analytics;
@@ -47,7 +48,10 @@ class _LogsScreenState extends State<LogsScreen> {
       appBar: AppBar(
         title: const Text('Logs & analytics'),
         actions: [
-          IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: _refresh),
+          IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Refresh',
+              onPressed: _refresh),
         ],
       ),
       body: SafeArea(
@@ -70,11 +74,14 @@ class _LogsScreenState extends State<LogsScreen> {
                 ],
                 selected: {_view},
                 showSelectedIcon: false,
-                onSelectionChanged: (selection) => setState(() => _view = selection.first),
+                onSelectionChanged: (selection) =>
+                    setState(() => _view = selection.first),
               ),
             ),
             Expanded(
-              child: _view == _LogsView.analytics ? _AnalyticsView(future: _visitsFuture!) : _ActivityLogView(future: _logLinesFuture!),
+              child: _view == _LogsView.analytics
+                  ? _AnalyticsView(future: _visitsFuture!)
+                  : _ActivityLogView(future: _logLinesFuture!),
             ),
           ],
         ),
@@ -100,7 +107,8 @@ class _AnalyticsView extends StatelessWidget {
         if (visits.isEmpty) {
           return const _EmptyState(
             icon: Icons.insights_outlined,
-            message: 'No zone visits recorded yet — walk between zones to start building analytics.',
+            message:
+                'No zone visits recorded yet — walk between zones to start building analytics.',
           );
         }
 
@@ -114,21 +122,26 @@ class _AnalyticsView extends StatelessWidget {
           children: [
             Text(
               'Total time spent per zone',
-              style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+              style:
+                  textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 4),
             Text(
               '${visits.length} recorded visit${visits.length == 1 ? '' : 's'}',
-              style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+              style: textTheme.bodySmall
+                  ?.copyWith(color: colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: 16),
             for (var i = 0; i < totals.length; i++)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
-                    color: i == 0 ? colorScheme.primaryContainer : colorScheme.surfaceContainerHigh,
+                    color: i == 0
+                        ? colorScheme.primaryContainer
+                        : colorScheme.surfaceContainerHigh,
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Row(
@@ -136,7 +149,8 @@ class _AnalyticsView extends StatelessWidget {
                       if (i == 0)
                         Padding(
                           padding: const EdgeInsets.only(right: 8),
-                          child: Icon(Icons.star, size: 18, color: colorScheme.onPrimaryContainer),
+                          child: Icon(Icons.star,
+                              size: 18, color: colorScheme.onPrimaryContainer),
                         ),
                       Expanded(
                         child: Text(
@@ -145,7 +159,8 @@ class _AnalyticsView extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w600,
-                            color: i == 0 ? colorScheme.onPrimaryContainer : null,
+                            color:
+                                i == 0 ? colorScheme.onPrimaryContainer : null,
                           ),
                         ),
                       ),
@@ -153,7 +168,9 @@ class _AnalyticsView extends StatelessWidget {
                         _formatDuration(totals[i].value.total),
                         style: textTheme.bodyMedium?.copyWith(
                           fontWeight: FontWeight.w700,
-                          color: i == 0 ? colorScheme.onPrimaryContainer : colorScheme.primary,
+                          color: i == 0
+                              ? colorScheme.onPrimaryContainer
+                              : colorScheme.primary,
                         ),
                       ),
                     ],
@@ -206,7 +223,10 @@ class _ActivityLogView extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 line,
-                style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: colorScheme.onSurface),
+                style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    color: colorScheme.onSurface),
               ),
             );
           },

@@ -5,12 +5,12 @@ import 'dart:ui' show Offset;
 import 'package:flutter/foundation.dart';
 
 import '../models/magnetic_fingerprint.dart';
-import '../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import 'magnetic_fingerprint_service.dart';
-import 'motion_service.dart';
 
 class MagneticFingerprintController extends ChangeNotifier {
-  MagneticFingerprintController({required this.storeMap, required this.service, this.motionService}) {
+  MagneticFingerprintController(
+      {required this.storeMap, required this.service, this.motionService}) {
     _sampleSub = service.samples.listen(_onSample);
     _errorSub = service.errors.listen((message) {
       errorMessage = message;
@@ -59,7 +59,8 @@ class MagneticFingerprintController extends ChangeNotifier {
   double capturedStepDistanceMeters = 0;
 
   bool get isBeaconConfident => anchorConfidence >= 0.60;
-  bool get isBeaconAmbiguous => anchorConfidence >= 0.35 && anchorConfidence < 0.60;
+  bool get isBeaconAmbiguous =>
+      anchorConfidence >= 0.35 && anchorConfidence < 0.60;
 
   int get fingerprintCount => service.fingerprints.length;
   int get trajectoryCount => service.trajectories.length;
@@ -82,7 +83,9 @@ class MagneticFingerprintController extends ChangeNotifier {
     if (base == null || heading == null) return;
     final radians = (heading - storeMap.mapNorthOffsetDegrees) * math.pi / 180;
     final distanceUnits = distanceMeters / storeMap.metersPerUnit;
-    final proposed = base + Offset(math.sin(radians) * distanceUnits, -math.cos(radians) * distanceUnits);
+    final proposed = base +
+        Offset(math.sin(radians) * distanceUnits,
+            -math.cos(radians) * distanceUnits);
     final graphSnapped = storeMap.snapToGraph(proposed).point;
     final snapped = service.constrainToCoverage(
       graphSnapped,
@@ -98,11 +101,13 @@ class MagneticFingerprintController extends ChangeNotifier {
   /// when the beacon is ambiguous.
   void updateAnchor(Offset position, {double confidence = 1}) {
     final normalizedConfidence = confidence.clamp(0.0, 1.0);
-    final anchorMoved = _lastAppliedAnchor == null || (_lastAppliedAnchor! - position).distance >= 12;
+    final anchorMoved = _lastAppliedAnchor == null ||
+        (_lastAppliedAnchor! - position).distance >= 12;
     anchorPosition = position;
     anchorConfidence = normalizedConfidence;
 
-    final firstAnchor = _lastAppliedAnchor == null && normalizedConfidence >= 0.35;
+    final firstAnchor =
+        _lastAppliedAnchor == null && normalizedConfidence >= 0.35;
     final confidentReset = normalizedConfidence >= 0.60 && anchorMoved;
     if (firstAnchor || confidentReset) {
       estimatedPosition = position;
@@ -147,7 +152,9 @@ class MagneticFingerprintController extends ChangeNotifier {
     _samplesSinceMagneticCorrection++;
 
     final lastKnownPosition = _pdrPosition ?? estimatedPosition;
-    final shouldUseMagneticTieBreak = isBeaconAmbiguous && anchorPosition != null && lastKnownPosition != null;
+    final shouldUseMagneticTieBreak = isBeaconAmbiguous &&
+        anchorPosition != null &&
+        lastKnownPosition != null;
 
     if (_samplesSinceMagneticCorrection >= 8 && shouldUseMagneticTieBreak) {
       _samplesSinceMagneticCorrection = 0;
@@ -228,7 +235,8 @@ class MagneticFingerprintController extends ChangeNotifier {
   List<Offset> _positionsAlongRoute(int count) {
     final lengths = <double>[0];
     for (var i = 1; i < routePoints.length; i++) {
-      lengths.add(lengths.last + (routePoints[i] - routePoints[i - 1]).distance);
+      lengths
+          .add(lengths.last + (routePoints[i] - routePoints[i - 1]).distance);
     }
     final total = lengths.last;
     if (total == 0) return List<Offset>.filled(count, routePoints.first);
@@ -239,8 +247,10 @@ class MagneticFingerprintController extends ChangeNotifier {
         segment++;
       }
       final startDistance = lengths[segment - 1];
-      final fraction = (distance - startDistance) / (lengths[segment] - startDistance);
-      return Offset.lerp(routePoints[segment - 1], routePoints[segment], fraction)!;
+      final fraction =
+          (distance - startDistance) / (lengths[segment] - startDistance);
+      return Offset.lerp(
+          routePoints[segment - 1], routePoints[segment], fraction)!;
     });
   }
 
@@ -256,7 +266,10 @@ class MagneticFingerprintController extends ChangeNotifier {
     _captureTimer = null;
     final position = pendingCapturePosition;
     if (position != null && _captureSamples.isNotEmpty) {
-      service.addFingerprint(floorId: 'default-floor', position: position, samples: _captureSamples);
+      service.addFingerprint(
+          floorId: 'default-floor',
+          position: position,
+          samples: _captureSamples);
     }
     isCapturing = false;
     pendingCapturePosition = null;

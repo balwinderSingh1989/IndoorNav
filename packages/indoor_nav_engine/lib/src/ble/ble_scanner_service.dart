@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 
+import 'package:dchs_flutter_beacon/dchs_flutter_beacon.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import '../observations/beacon_observation_source.dart';
 
 class _TimedRssi {
   final DateTime time;
@@ -17,7 +20,8 @@ class _BeaconKalmanState {
   double estimate = -70.0; // Initial estimate (typical indoor RSSI)
   double estimateError; // Initial estimate error (in dB)
   double measurementError; // Measurement noise (in dB) — tunable
-  double processNoise; // Process noise — how much signal can drift between readings
+  double
+      processNoise; // Process noise — how much signal can drift between readings
 
   _BeaconKalmanState({
     this.estimateError = 2.0,
@@ -64,12 +68,12 @@ class BeaconScanInfo {
   final DateTime lastSeen;
 
   BeaconScanInfo copyWith({double? rssi}) => BeaconScanInfo(
-    key: key,
-    scannerId: scannerId,
-    name: name,
-    rssi: rssi ?? this.rssi,
-    lastSeen: lastSeen,
-  );
+        key: key,
+        scannerId: scannerId,
+        name: name,
+        rssi: rssi ?? this.rssi,
+        lastSeen: lastSeen,
+      );
 }
 
 /// Scans for nearby beacons and emits a rolling average RSSI per beacon
@@ -91,7 +95,7 @@ class BeaconScanInfo {
 /// throttle would otherwise look identical to "no beacons nearby" with no
 /// error surfaced — see [_statusSub], the scan subscription's `onDone`,
 /// and [_watchdogTimer].
-class BleScannerService {
+class BleScannerService implements BeaconObservationSource {
   BleScannerService({
     FlutterReactiveBle? ble,
     // INDOOR TUNING (Sept 28):
@@ -108,6 +112,12 @@ class BleScannerService {
     this.kalmanMeasurementError = 1.0,
     this.kalmanProcessNoise = 0.04,
     this.kalmanInitialError = 2.5,
+    this.staleBeaconTimeout = const Duration(seconds: 5),
+    this.staleSweepInterval = const Duration(seconds: 2),
+    this.watchdogNoDeviceThreshold = const Duration(seconds: 10),
+    this.watchdogCheckInterval = const Duration(seconds: 5),
+    this.enableDiagnosticLogging = true,
+    this.iosProximityUuids = const [],
   }) : _ble = ble;
 
   FlutterReactiveBle? _ble;
@@ -119,6 +129,12 @@ class BleScannerService {
   final double kalmanMeasurementError;
   final double kalmanProcessNoise;
   final double kalmanInitialError;
+  final Duration staleBeaconTimeout;
+  final Duration staleSweepInterval;
+  final Duration watchdogNoDeviceThreshold;
+  final Duration watchdogCheckInterval;
+  final bool enableDiagnosticLogging;
+  final List<String> iosProximityUuids;
 
   /// Per-beacon Kalman filter states for RSSI estimation
   final Map<String, _BeaconKalmanState> _kalmanStates = {};
@@ -133,16 +149,12 @@ class BleScannerService {
   /// (increasingly stale) RSSI forever, since [_readings] is only pruned
   /// reactively — inside [_onDeviceSeen], which stops running for that key
   /// the moment it stops being detected.
-  static const Duration _staleBeaconTimeout = Duration(seconds: 5);
-  static const Duration _staleSweepInterval = Duration(seconds: 2);
 
   /// If no device of any kind has been seen for this long while the
   /// adapter reports ready, treat the scan as silently stalled and
   /// restart it. This is the backstop for failure modes that produce
   /// neither an error nor a stream-done event — a known flakiness pattern
   /// on some Android BLE stacks/OEMs.
-  static const Duration _watchdogNoDeviceThreshold = Duration(seconds: 10);
-  static const Duration _watchdogCheckInterval = Duration(seconds: 5);
 
   /// Initialize beacon name lookup from store data.
   /// Call this before scanning to ensure proper names in logs.
@@ -171,14 +183,18 @@ class BleScannerService {
   final Map<String, List<_TimedRssi>> _readings = {};
   final Map<String, BeaconScanInfo> _scanInfoByKey = {};
   final _rssiController = StreamController<Map<String, double>>.broadcast();
-  final _scanInfoController = StreamController<List<BeaconScanInfo>>.broadcast();
+  final _scanInfoController =
+      StreamController<List<BeaconScanInfo>>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   StreamSubscription<DiscoveredDevice>? _scanSub;
+  StreamSubscription<RangingResult>? _iosRangingSub;
   StreamSubscription<BleStatus>? _statusSub;
   Timer? _staleSweepTimer;
   Timer? _watchdogTimer;
-  DateTime? _lastDeviceSeenAt;
+  DateTime? _lastObservationAt;
   bool _restarting = false;
+  bool _disposed = false;
+  Future<void>? _startOperation;
   List<BeaconScanInfo> _latestScanInfo = const [];
 
   /// Averaged RSSI per beacon identity ("uuid:major:minor"), updated on
@@ -196,13 +212,41 @@ class BleScannerService {
   Stream<String> get errors => _errorController.stream;
 
   Future<void> startScan() async {
+    if (_disposed) return;
+    final activeStart = _startOperation;
+    if (activeStart != null) return activeStart;
+
+    late final Future<void> operation;
+    operation = _startScanInternal();
+    _startOperation = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_startOperation, operation)) _startOperation = null;
+    }
+  }
+
+  Future<void> _startScanInternal() async {
+    _diagnostic(
+      'startScan platform=${Platform.operatingSystem} '
+      'filter=$filterMode rollingWindow=${rollingWindow.inMilliseconds}ms',
+    );
     if (_ble == null && (Platform.isAndroid || Platform.isIOS)) {
       _ble = FlutterReactiveBle();
     }
-    if (_ble == null) return;
+    if (_ble == null) {
+      _diagnostic('scan not started: FlutterReactiveBle instance is null');
+      return;
+    }
+
+    if (Platform.isIOS) {
+      await _startIosBeaconRanging();
+      return;
+    }
 
     final permissionError = await _ensurePermissions();
     if (permissionError != null) {
+      _diagnostic('scan not started: $permissionError');
       _errorController.add(permissionError);
       return;
     }
@@ -216,6 +260,7 @@ class BleScannerService {
     _watchdogTimer?.cancel();
 
     _statusSub = _ble!.statusStream.listen((status) {
+      _diagnostic('adapter status=$status');
       if (status != BleStatus.ready) {
         _errorController.add('Bluetooth adapter not ready: $status');
         return;
@@ -227,38 +272,64 @@ class BleScannerService {
       }
     });
 
+    if (_ble!.status != BleStatus.ready) {
+      _diagnostic(
+        'waiting for Android adapter readiness status=${_ble!.status}',
+      );
+      try {
+        await _ble!.statusStream
+            .firstWhere((status) => status == BleStatus.ready)
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {
+        final status = _ble!.status;
+        _diagnostic('Android adapter did not become ready status=$status');
+        _errorController.add('Bluetooth adapter is not ready: $status');
+        return;
+      }
+    }
+
     // lowLatency maximizes scan duty cycle (vs the balanced/lowPower
     // defaults), which matters for beacons with a sparse advertising
     // interval — nRF Connect and similar dedicated scanner apps tend to
     // scan more aggressively by default, which is why they can see a
     // beacon a lower-duty-cycle scan mode would miss.
-    _scanSub = _ble!.scanForDevices(withServices: [], scanMode: ScanMode.lowLatency).listen(
+    _scanSub = _ble!
+        .scanForDevices(withServices: [], scanMode: ScanMode.lowLatency).listen(
       _onDeviceSeen,
       onError: (Object e) {
+        _diagnostic('scan stream error=$e');
         _errorController.add('BLE scan error: $e — restarting scan.');
         _restartScan();
       },
       onDone: () {
+        _diagnostic('scan stream done; restarting scan');
         // The scan stream closed without an error — this happens on
         // some Android adapters/OEMs after a silent internal reset.
         // Treated the same as an error: restart rather than leave
         // scanning permanently stopped with no signal that it happened.
-        _errorController.add('BLE scan stream ended unexpectedly — restarting scan.');
+        _errorController
+            .add('BLE scan stream ended unexpectedly — restarting scan.');
         _restartScan();
       },
     );
 
-    _lastDeviceSeenAt ??= DateTime.now(); // don't immediately trip the watchdog on a cold start
-    _staleSweepTimer = Timer.periodic(_staleSweepInterval, (_) => _pruneStaleReadings());
-    _watchdogTimer = Timer.periodic(_watchdogCheckInterval, (_) => _checkScanHealth());
+    _lastObservationAt = DateTime.now();
+    _diagnostic('scan subscription active; waiting for discovered devices');
+    _staleSweepTimer =
+        Timer.periodic(staleSweepInterval, (_) => _pruneStaleReadings());
+    _watchdogTimer =
+        Timer.periodic(watchdogCheckInterval, (_) => _checkScanHealth());
   }
 
   Future<void> _restartScan() async {
-    if (_restarting) return; // avoid overlapping restarts if multiple signals fire close together
+    if (_disposed || _restarting)
+      return; // avoid overlapping restarts if multiple signals fire close together
     _restarting = true;
     try {
       await _scanSub?.cancel();
       _scanSub = null;
+      await _iosRangingSub?.cancel();
+      _iosRangingSub = null;
       await Future<void>.delayed(const Duration(milliseconds: 300));
       await startScan();
     } finally {
@@ -266,15 +337,135 @@ class BleScannerService {
     }
   }
 
-  void _checkScanHealth() {
-    final last = _lastDeviceSeenAt;
-    if (last == null) return;
-    if (DateTime.now().difference(last) > _watchdogNoDeviceThreshold) {
-      _errorController.add(
-        'No BLE devices seen for ${_watchdogNoDeviceThreshold.inSeconds}s — '
-            'scan may have silently stalled, restarting.',
+  Future<void> _startIosBeaconRanging() async {
+    if (iosProximityUuids.isEmpty) {
+      const message =
+          'iOS beacon ranging not started: no proximity UUID configured.';
+      _diagnostic(message);
+      _errorController.add(message);
+      return;
+    }
+
+    await _scanSub?.cancel();
+    _scanSub = null;
+    await _iosRangingSub?.cancel();
+    _iosRangingSub = null;
+    _staleSweepTimer?.cancel();
+    _watchdogTimer?.cancel();
+
+    try {
+      await flutterBeacon.setLocationAuthorizationTypeDefault(
+        AuthorizationStatus.whenInUse,
       );
-      _lastDeviceSeenAt = DateTime.now(); // reset so the watchdog doesn't refire every tick during the restart
+
+      var authorizationStatus = await flutterBeacon.authorizationStatus;
+      _diagnostic('iOS location authorization status=$authorizationStatus');
+      if (authorizationStatus == AuthorizationStatus.notDetermined) {
+        final requested = await flutterBeacon.requestAuthorization;
+        _diagnostic('iOS location authorization requested=$requested');
+        authorizationStatus = await flutterBeacon.authorizationStatus;
+        _diagnostic(
+          'iOS location authorization status after request=$authorizationStatus',
+        );
+      }
+      if (authorizationStatus == AuthorizationStatus.denied ||
+          authorizationStatus == AuthorizationStatus.restricted) {
+        _errorController.add(
+          'iOS location permission is $authorizationStatus. Enable Location Services for this app in Settings.',
+        );
+        return;
+      }
+
+      final bluetoothState = await flutterBeacon.bluetoothState;
+      final locationServicesEnabled =
+          await flutterBeacon.checkLocationServicesIfEnabled;
+      _diagnostic(
+        'iOS readiness bluetooth=$bluetoothState '
+        'locationServicesEnabled=$locationServicesEnabled',
+      );
+      if (bluetoothState != BluetoothState.stateOn) {
+        _errorController.add(
+          'iOS Bluetooth is $bluetoothState. Turn on Bluetooth and try again.',
+        );
+        return;
+      }
+      if (!locationServicesEnabled) {
+        _errorController.add(
+          'iOS Location Services are disabled. Enable them in Settings.',
+        );
+        return;
+      }
+
+      final initialized = await flutterBeacon.initializeScanning;
+      _diagnostic(
+        'iOS CoreLocation ranging initialized=$initialized '
+        'uuids=${iosProximityUuids.join(',')}',
+      );
+      if (!initialized) {
+        _errorController.add(
+          'iOS beacon ranging could not initialize. Enable Bluetooth and Location Services.',
+        );
+        return;
+      }
+
+      final regions = iosProximityUuids
+          .toSet()
+          .map(
+            (uuid) => Region(
+              identifier: 'indoor-nav-${uuid.toLowerCase()}',
+              proximityUUID: uuid,
+            ),
+          )
+          .toList(growable: false);
+      _iosRangingSub = flutterBeacon.ranging(regions).listen(
+        _onIosRangingResult,
+        onError: (Object error) {
+          _diagnostic('iOS CoreLocation ranging error=$error');
+          _errorController.add('iOS beacon ranging error: $error');
+        },
+      );
+      _lastObservationAt = DateTime.now();
+      _staleSweepTimer =
+          Timer.periodic(staleSweepInterval, (_) => _pruneStaleReadings());
+      _watchdogTimer =
+          Timer.periodic(watchdogCheckInterval, (_) => _checkScanHealth());
+    } catch (error) {
+      _diagnostic('iOS CoreLocation ranging initialization error=$error');
+      _errorController.add('iOS beacon ranging initialization error: $error');
+    }
+  }
+
+  void _onIosRangingResult(RangingResult result) {
+    _lastObservationAt = DateTime.now();
+    _diagnostic(
+      'iOS ranging region=${result.region.identifier} '
+      'beaconCount=${result.beacons.length}',
+    );
+    for (final beacon in result.beacons) {
+      final key =
+          '${beacon.proximityUUID.toLowerCase()}:${beacon.major}:${beacon.minor}';
+      _diagnostic(
+        'iOS beacon key=$key rssi=${beacon.rssi} '
+        'accuracy=${beacon.accuracy} proximity=${beacon.proximity}',
+      );
+      if (beacon.rssi == 0 || beacon.rssi == -1) continue;
+      _recordBeacon(key: key, scannerId: 'ios:$key', rssi: beacon.rssi);
+    }
+  }
+
+  void _checkScanHealth() {
+    final last = _lastObservationAt;
+    if (last == null) return;
+    if (DateTime.now().difference(last) > watchdogNoDeviceThreshold) {
+      _diagnostic(
+        'watchdog fired: lastObservation=$last '
+        'knownBeaconCount=${_scanInfoByKey.length}',
+      );
+      _errorController.add(
+        'No BLE scan observations seen for ${watchdogNoDeviceThreshold.inSeconds}s — '
+        'scan may have silently stalled, restarting.',
+      );
+      _lastObservationAt = DateTime.now();
       _restartScan();
     }
   }
@@ -282,7 +473,8 @@ class BleScannerService {
   void _pruneStaleReadings() {
     final now = DateTime.now();
     final staleKeys = _scanInfoByKey.entries
-        .where((entry) => now.difference(entry.value.lastSeen) > _staleBeaconTimeout)
+        .where((entry) =>
+            now.difference(entry.value.lastSeen) > staleBeaconTimeout)
         .map((entry) => entry.key)
         .toList();
     if (staleKeys.isEmpty) return;
@@ -311,7 +503,10 @@ class BleScannerService {
         Permission.bluetoothConnect,
         Permission.locationWhenInUse,
       ].request();
-      final denied = statuses.entries.where((e) => !e.value.isGranted).map((e) => e.key.toString());
+      _diagnostic('Android permission statuses=$statuses');
+      final denied = statuses.entries
+          .where((e) => !e.value.isGranted)
+          .map((e) => e.key.toString());
       if (denied.isNotEmpty) {
         return 'Missing permissions: ${denied.join(', ')}. Grant them in system settings.';
       }
@@ -319,6 +514,7 @@ class BleScannerService {
     }
     if (Platform.isIOS) {
       final status = await Permission.bluetooth.request();
+      _diagnostic('iOS Bluetooth permission status=$status');
       if (!status.isGranted) {
         return 'Bluetooth permission denied. Grant it in Settings > Privacy > Bluetooth.';
       }
@@ -328,12 +524,30 @@ class BleScannerService {
   }
 
   void _onDeviceSeen(DiscoveredDevice device) {
-
-
+    _lastObservationAt = DateTime.now();
     final manufacturerHex = device.manufacturerData.isNotEmpty
-        ? device.manufacturerData.map((b) => b.toRadixString(16).padLeft(2, '0')).join()
+        ? device.manufacturerData
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join()
         : '<empty>';
-    final beacon = parseIBeacon(device.manufacturerData);
+    final serviceDataHex = device.serviceData.isEmpty
+        ? '<empty>'
+        : device.serviceData.entries.map((entry) {
+            final bytes = entry.value
+                .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                .join();
+            return '${entry.key}:$bytes';
+          }).join(',');
+    _diagnostic(
+      'device id=${device.id} name=${device.name.isEmpty ? '<empty>' : device.name} '
+      'rssi=${device.rssi} services=${device.serviceUuids} '
+      'manufacturerLength=${device.manufacturerData.length} '
+      'manufacturerData=$manufacturerHex serviceData=$serviceDataHex',
+    );
+    final beacon = parseIBeacon(device.manufacturerData,
+        logDiagnostics: enableDiagnosticLogging);
+    _diagnostic(
+        'device id=${device.id} parseResult=${beacon ?? '<not an iBeacon>'}');
     String? key;
 
     final normalizedDeviceId = device.id.replaceAll(':', '').toLowerCase();
@@ -342,32 +556,45 @@ class BleScannerService {
       print('BLE scan: mapped device=${device.id} to beacon key=$key via MAC');
     } else if (beacon != null) {
       key = beacon.key;
-      print('BLE scan: mapped device=${device.id} to beacon key=$key via iBeacon');
+      print(
+          'BLE scan: mapped device=${device.id} to beacon key=$key via iBeacon');
     }
-
-
 
     if (key == null) {
+      _diagnostic('device id=${device.id} ignored: no beacon key resolved');
       return;
-    }else {
-      print('BLE scan: device=${device.id} name=${device.name} rssi=${device.rssi} '
+    } else {
+      print(
+          'BLE scan: device=${device.id} name=${device.name} rssi=${device.rssi} '
           'services=${device.serviceUuids} manufacturerData=$manufacturerHex parsedIBeacon=$beacon key=$key');
-      _lastDeviceSeenAt = DateTime.now();
     }
 
+    _recordBeacon(
+        key: key,
+        scannerId: device.id,
+        rssi: device.rssi,
+        deviceName: beacon?.key);
+  }
+
+  void _recordBeacon({
+    required String key,
+    required String scannerId,
+    required int rssi,
+    String? deviceName,
+  }) {
     final now = DateTime.now();
     final history = _readings.putIfAbsent(key, () => []);
-    history.add(_TimedRssi(now, device.rssi));
+    history.add(_TimedRssi(now, rssi));
     history.removeWhere((r) => now.difference(r.time) > rollingWindow);
-    
+
     // Use beacon name from store data if available, otherwise use device name
-    final beaconName = _beaconNamesByKey[key] ?? device.name;
-    
+    final beaconName = _beaconNamesByKey[key] ?? deviceName ?? key;
+
     _scanInfoByKey[key] = BeaconScanInfo(
       key: key,
-      scannerId: device.id,
+      scannerId: scannerId,
       name: beaconName,
-      rssi: device.rssi.toDouble(),
+      rssi: rssi.toDouble(),
       lastSeen: now,
     );
 
@@ -380,6 +607,9 @@ class BleScannerService {
     _scanInfoController.add(_latestScanInfo);
   }
 
+  void _diagnostic(String message) {
+    if (enableDiagnosticLogging) print('[BLE_DIAGNOSTIC] $message');
+  }
 
 // //average - better for celing mounted BEacons
 //   Map<String, double> _averagedRssi() {
@@ -493,17 +723,17 @@ class BleScannerService {
     for (final key in keys) {
       final scanInfo = _scanInfoByKey[key];
       final storedName = _beaconNamesByKey[key];
-      
+
       // Priority: scanInfo name > stored name lookup > key
       String beaconName = 'Unknown';
-      if (scanInfo?.name?.isNotEmpty ?? false) {
+      if (scanInfo?.name.isNotEmpty ?? false) {
         beaconName = scanInfo!.name;
       } else if (storedName?.isNotEmpty ?? false) {
         beaconName = storedName!;
       } else {
         beaconName = 'Unknown (key: $key)';
       }
-      
+
       final medianVal = median[key]?.toStringAsFixed(1) ?? 'N/A';
       final kalmanVal = kalman[key]?.toStringAsFixed(1) ?? 'N/A';
       final diff = (median[key] != null && kalman[key] != null)
@@ -530,15 +760,20 @@ class BleScannerService {
   void stopScan() {
     _scanSub?.cancel();
     _scanSub = null;
+    _iosRangingSub?.cancel();
+    _iosRangingSub = null;
     _statusSub?.cancel();
     _statusSub = null;
     _staleSweepTimer?.cancel();
     _staleSweepTimer = null;
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
+    _lastObservationAt = null;
   }
 
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     stopScan();
     _rssiController.close();
     _scanInfoController.close();
@@ -563,31 +798,57 @@ class IBeacon {
 /// Parses an iBeacon advertisement's manufacturer data (Apple company id
 /// 0x004C, iBeacon type 0x0215) into its proximity UUID, major, and minor,
 /// or null if [data] doesn't contain a valid iBeacon payload.
-IBeacon? parseIBeacon(Uint8List data) {
+IBeacon? parseIBeacon(Uint8List data, {bool logDiagnostics = false}) {
   final rawHex = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  if (data.length < 4) {
-    //print('parseIBeacon: data too short to contain iBeacon header');
+  if (data.length < 2) {
+    if (logDiagnostics) {
+      print(
+          '[BLE_PARSE] rejected: data too short length=${data.length} hex=$rawHex');
+    }
     return null;
   }
 
-  for (var i = 0; i <= data.length - 4; i++) {
-    if (data[i] == 0x4C && data[i + 1] == 0x00 && data[i + 2] == 0x02 && data[i + 3] == 0x15) {
-      if (i + 24 > data.length) {
-       // print('parseIBeacon: found prefix at $i but payload is too short (${data.length - i} bytes)');
+  for (var i = 0; i <= data.length - 2; i++) {
+    final hasCompanyId = i + 4 <= data.length &&
+        data[i] == 0x4C &&
+        data[i + 1] == 0x00 &&
+        data[i + 2] == 0x02 &&
+        data[i + 3] == 0x15;
+    final hasIBeaconType = data[i] == 0x02 && data[i + 1] == 0x15;
+    if (hasCompanyId || hasIBeaconType) {
+      final payloadStart = hasCompanyId ? i + 2 : i;
+      if (logDiagnostics) {
+        print(
+          '[BLE_PARSE] header=${hasCompanyId ? 'apple-company-id' : 'iBeacon-type-only'} '
+          'offset=$i payloadStart=$payloadStart dataLength=${data.length}',
+        );
+      }
+      if (payloadStart + 24 > data.length) {
+        if (logDiagnostics) {
+          print(
+            '[BLE_PARSE] rejected: incomplete payload '
+            'available=${data.length - payloadStart} required=24 hex=$rawHex',
+          );
+        }
         return null;
       }
-      final uuidBytes = data.sublist(i + 4, i + 20);
-      final hex = uuidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-      final uuid = '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
+      final uuidBytes = data.sublist(payloadStart + 2, payloadStart + 18);
+      final hex =
+          uuidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      final uuid =
+          '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
           '${hex.substring(16, 20)}-${hex.substring(20, 32)}';
-      final major = (data[i + 20] << 8) | data[i + 21];
-      final minor = (data[i + 22] << 8) | data[i + 23];
+      final major = (data[payloadStart + 18] << 8) | data[payloadStart + 19];
+      final minor = (data[payloadStart + 20] << 8) | data[payloadStart + 21];
       final beacon = IBeacon(uuid: uuid, major: major, minor: minor);
-     // print('parseIBeacon: parsed=$beacon at offset=$i');
+      if (logDiagnostics) print('[BLE_PARSE] accepted beacon=$beacon');
       return beacon;
     }
   }
 
+  if (logDiagnostics) {
+    print('[BLE_PARSE] rejected: no iBeacon header found hex=$rawHex');
+  }
   return null;
 }

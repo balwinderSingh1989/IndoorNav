@@ -2,8 +2,7 @@ import 'dart:ui' show Offset;
 
 import 'package:flutter/material.dart';
 
-import '../../models/beacon.dart';
-import '../../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../../services/beacon_placement_generator.dart';
 
 class BeaconSettingsEditor extends StatefulWidget {
@@ -29,8 +28,10 @@ class _BeaconSettingsEditorState extends State<BeaconSettingsEditor> {
     super.initState();
     _nameController = TextEditingController(text: widget.beacon.name);
     _bleIdController = TextEditingController(text: widget.beacon.bleId);
-    _majorController = TextEditingController(text: widget.beacon.major?.toString() ?? '');
-    _minorController = TextEditingController(text: widget.beacon.minor?.toString() ?? '');
+    _majorController =
+        TextEditingController(text: widget.beacon.major?.toString() ?? '');
+    _minorController =
+        TextEditingController(text: widget.beacon.minor?.toString() ?? '');
   }
 
   @override
@@ -67,7 +68,8 @@ class _BeaconSettingsEditorState extends State<BeaconSettingsEditor> {
                   Expanded(
                     child: TextField(
                       controller: _majorController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: false),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: false),
                       decoration: const InputDecoration(labelText: 'Major'),
                     ),
                   ),
@@ -75,7 +77,8 @@ class _BeaconSettingsEditorState extends State<BeaconSettingsEditor> {
                   Expanded(
                     child: TextField(
                       controller: _minorController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: false),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: false),
                       decoration: const InputDecoration(labelText: 'Minor'),
                     ),
                   ),
@@ -95,7 +98,9 @@ class _BeaconSettingsEditorState extends State<BeaconSettingsEditor> {
             final updated = Beacon(
               id: widget.beacon.id,
               bleId: _bleIdController.text.trim(),
-              name: _nameController.text.trim().isEmpty ? widget.beacon.name : _nameController.text.trim(),
+              name: _nameController.text.trim().isEmpty
+                  ? widget.beacon.name
+                  : _nameController.text.trim(),
               major: int.tryParse(_majorController.text.trim()),
               minor: int.tryParse(_minorController.text.trim()),
               position: widget.beacon.position,
@@ -110,7 +115,8 @@ class _BeaconSettingsEditorState extends State<BeaconSettingsEditor> {
 }
 
 class BeaconPlacementDemo {
-  static Future<List<BeaconPlacementSuggestion>> generateSuggestionsForMap() async {
+  static Future<List<BeaconPlacementSuggestion>>
+      generateSuggestionsForMap() async {
     return const BeaconPlacementGenerator().generate(
       StoreMapDummyData.example,
     );

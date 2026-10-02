@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart' show rootBundle;
 
-import '../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 /// Loads the store's beacon/aisle graph from the bundled store_data.json asset.
 class StoreDataRepository {

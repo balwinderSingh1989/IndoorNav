@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../models/product.dart';
-import '../../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../../services/catalog_api_service.dart';
 import '../utils/zone_assignment.dart';
 import 'product_grid_tile.dart';
@@ -146,7 +146,8 @@ class _SearchResultsState extends State<_SearchResults> {
       case _Status.idle:
         return const Center(child: Text('Search for a product'));
       case _Status.loading:
-        return _SearchingIndicator(textTheme: textTheme, colorScheme: colorScheme);
+        return _SearchingIndicator(
+            textTheme: textTheme, colorScheme: colorScheme);
       case _Status.error:
         return Center(
           child: Padding(
@@ -154,7 +155,8 @@ class _SearchResultsState extends State<_SearchResults> {
             child: Text(
               '$_error',
               textAlign: TextAlign.center,
-              style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+              style: textTheme.bodyMedium
+                  ?.copyWith(color: colorScheme.onSurfaceVariant),
             ),
           ),
         );
@@ -197,7 +199,8 @@ class _SearchResultsState extends State<_SearchResults> {
 /// it runs past a couple of seconds, so this pairs it with a caption
 /// setting that expectation.
 class _SearchingIndicator extends StatelessWidget {
-  const _SearchingIndicator({required this.textTheme, required this.colorScheme});
+  const _SearchingIndicator(
+      {required this.textTheme, required this.colorScheme});
 
   final TextTheme textTheme;
   final ColorScheme colorScheme;
@@ -213,7 +216,8 @@ class _SearchingIndicator extends StatelessWidget {
           Text(
             'Searching the catalog…\nthis can take a few seconds',
             textAlign: TextAlign.center,
-            style: textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+            style: textTheme.bodySmall
+                ?.copyWith(color: colorScheme.onSurfaceVariant),
           ),
         ],
       ),

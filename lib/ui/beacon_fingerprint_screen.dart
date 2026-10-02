@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../models/beacon_fingerprint.dart';
-import '../services/beacon_fingerprint_controller.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 class BeaconFingerprintScreen extends StatefulWidget {
   const BeaconFingerprintScreen({super.key, required this.controller});
@@ -9,7 +8,8 @@ class BeaconFingerprintScreen extends StatefulWidget {
   final BeaconFingerprintController controller;
 
   @override
-  State<BeaconFingerprintScreen> createState() => _BeaconFingerprintScreenState();
+  State<BeaconFingerprintScreen> createState() =>
+      _BeaconFingerprintScreenState();
 }
 
 class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
@@ -61,7 +61,9 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
             onChanged: controller.isCapturing
                 ? null
                 : (beaconId) => controller.selectBeacon(
-                      controller.beacons.where((beacon) => beacon.id == beaconId).firstOrNull,
+                      controller.beacons
+                          .where((beacon) => beacon.id == beaconId)
+                          .firstOrNull,
                     ),
           ),
           const SizedBox(height: 12),
@@ -72,7 +74,8 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 20),
-          Text('Capture duration: ${controller.captureDuration}s', style: Theme.of(context).textTheme.titleSmall),
+          Text('Capture duration: ${controller.captureDuration}s',
+              style: Theme.of(context).textTheme.titleSmall),
           Slider(
             value: controller.captureDuration.toDouble(),
             min: 3,
@@ -81,30 +84,39 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
             label: '${controller.captureDuration}s',
             onChanged: controller.isCapturing
                 ? null
-                : (value) => setState(() => controller.captureDuration = value.round()),
+                : (value) =>
+                    setState(() => controller.captureDuration = value.round()),
           ),
           FilledButton.icon(
-            onPressed: controller.isCapturing || selectedBeacon == null ? null : controller.startCapture,
+            onPressed: controller.isCapturing || selectedBeacon == null
+                ? null
+                : controller.startCapture,
             icon: controller.isCapturing
                 ? const SizedBox.square(
                     dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white),
                   )
                 : const Icon(Icons.fingerprint),
-            label: Text(controller.isCapturing ? 'Capturing ${controller.captureProgress}%' : 'Capture fingerprint'),
+            label: Text(controller.isCapturing
+                ? 'Capturing ${controller.captureProgress}%'
+                : 'Capture fingerprint'),
           ),
           if (controller.isCapturing) ...[
             const SizedBox(height: 8),
             LinearProgressIndicator(value: controller.captureProgress / 100),
           ],
           const SizedBox(height: 12),
-          Text(controller.statusMessage, style: Theme.of(context).textTheme.bodySmall),
+          Text(controller.statusMessage,
+              style: Theme.of(context).textTheme.bodySmall),
           const SizedBox(height: 28),
           Row(
             children: [
-              Text('Live quality', style: Theme.of(context).textTheme.titleMedium),
+              Text('Live quality',
+                  style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(width: 8),
-              Text('${controller.currentReadings.length} nearby readings', style: Theme.of(context).textTheme.bodySmall),
+              Text('${controller.currentReadings.length} nearby readings',
+                  style: Theme.of(context).textTheme.bodySmall),
             ],
           ),
           const SizedBox(height: 4),
@@ -124,7 +136,8 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
           if (controller.liveQuality.isEmpty)
             _EmptyQuality(selectedBeaconName: selectedBeacon?.name),
           const SizedBox(height: 24),
-          Text('Saved zones: ${controller.zones.length}', style: Theme.of(context).textTheme.bodySmall),
+          Text('Saved zones: ${controller.zones.length}',
+              style: Theme.of(context).textTheme.bodySmall),
         ],
       ),
     );
@@ -132,7 +145,10 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
 }
 
 class _QualityCard extends StatelessWidget {
-  const _QualityCard({required this.quality, required this.isSelected, required this.onSelect});
+  const _QualityCard(
+      {required this.quality,
+      required this.isSelected,
+      required this.onSelect});
 
   final FingerprintQuality? quality;
   final bool isSelected;
@@ -145,7 +161,8 @@ class _QualityCard extends StatelessWidget {
     final score = quality?.result?.distance;
     final isCorrelation = algorithm == BeaconDistanceAlgorithm.timeSeries;
     return Card(
-      color: isSelected ? Theme.of(context).colorScheme.secondaryContainer : null,
+      color:
+          isSelected ? Theme.of(context).colorScheme.secondaryContainer : null,
       child: ListTile(
         onTap: onSelect,
         leading: Container(

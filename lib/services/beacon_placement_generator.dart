@@ -4,7 +4,7 @@ import 'dart:ui' show Offset;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:xml/xml.dart';
 
-import '../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 class BeaconPlacementSuggestion {
   const BeaconPlacementSuggestion({
@@ -33,7 +33,8 @@ class CorridorSegment {
   final double endY;
   final String label;
 
-  double get lengthUnits => (Offset(endX, endY) - Offset(startX, startY)).distance;
+  double get lengthUnits =>
+      (Offset(endX, endY) - Offset(startX, startY)).distance;
 
   bool isHorizontal(double tolerance) => (endY - startY).abs() <= tolerance;
 
@@ -45,7 +46,8 @@ class BeaconPlacementGenerator {
 
   static final Map<String, List<CorridorSegment>> _segmentCache = {};
 
-  static Future<List<CorridorSegment>> loadWalkableSegments(String assetPath) async {
+  static Future<List<CorridorSegment>> loadWalkableSegments(
+      String assetPath) async {
     final cached = _segmentCache[assetPath];
     if (cached != null) return cached;
 
@@ -72,7 +74,8 @@ class BeaconPlacementGenerator {
             startY: start.dy,
             endX: end.dx,
             endY: end.dy,
-            label: element.getAttribute('id') ?? 'walkable_path_${segments.length + 1}',
+            label: element.getAttribute('id') ??
+                'walkable_path_${segments.length + 1}',
           ),
         );
       }
@@ -102,7 +105,8 @@ class BeaconPlacementGenerator {
 
     final deduped = <Offset>[];
     for (final point in junctions) {
-      final alreadyPresent = deduped.any((existing) => (existing - point).distance <= toleranceUnits);
+      final alreadyPresent = deduped
+          .any((existing) => (existing - point).distance <= toleranceUnits);
       if (!alreadyPresent) {
         deduped.add(point);
       }
@@ -128,7 +132,8 @@ class BeaconPlacementGenerator {
     );
 
     final segmentLengthMeters = segment.lengthUnits * metersPerUnit;
-    final intervalCount = config.maxBeaconsPerSegment ?? _anchorCountForLength(segmentLengthMeters, spacingMeters);
+    final intervalCount = config.maxBeaconsPerSegment ??
+        _anchorCountForLength(segmentLengthMeters, spacingMeters);
     final anchorCount = intervalCount.clamp(1, math.max(1, intervalCount));
 
     if (anchorCount <= 1) {
@@ -157,9 +162,12 @@ class BeaconPlacementGenerator {
     return points;
   }
 
-  static int _anchorCountForLength(double segmentLengthMeters, double spacingMeters) {
+  static int _anchorCountForLength(
+      double segmentLengthMeters, double spacingMeters) {
     if (segmentLengthMeters <= 0) return 1;
-    return math.max(2, (segmentLengthMeters / spacingMeters).round() + 1).toInt();
+    return math
+        .max(2, (segmentLengthMeters / spacingMeters).round() + 1)
+        .toInt();
   }
 
   static double _clampSpacing(double target, double min, double max) {
@@ -173,8 +181,8 @@ class BeaconPlacementGenerator {
     CorridorSegment b, {
     required double toleranceUnits,
   }) {
-    final denominator =
-        (a.startX - a.endX) * (b.startY - b.endY) - (a.startY - a.endY) * (b.startX - b.endX);
+    final denominator = (a.startX - a.endX) * (b.startY - b.endY) -
+        (a.startY - a.endY) * (b.startX - b.endX);
     if (denominator.abs() < 1e-6) {
       return null;
     }
@@ -205,10 +213,13 @@ class BeaconPlacementGenerator {
     final dy = segment.endY - segment.startY;
     final lengthSquared = dx * dx + dy * dy;
     if (lengthSquared == 0) {
-      return (point - Offset(segment.startX, segment.startY)).distance <= toleranceUnits;
+      return (point - Offset(segment.startX, segment.startY)).distance <=
+          toleranceUnits;
     }
 
-    final t = ((point.dx - segment.startX) * dx + (point.dy - segment.startY) * dy) / lengthSquared;
+    final t =
+        ((point.dx - segment.startX) * dx + (point.dy - segment.startY) * dy) /
+            lengthSquared;
     final clampedT = t.clamp(0.0, 1.0);
     final closest = Offset(
       segment.startX + dx * clampedT,
@@ -221,7 +232,8 @@ class BeaconPlacementGenerator {
     final pattern = RegExp(
       r'[MLmlHVhZz]|[-+]?(?:\d*\.\d+|\d+\.\d*|\d+)(?:[eE][-+]?\d+)?',
     );
-    final tokens = pattern.allMatches(d).map((match) => match.group(0)!).toList();
+    final tokens =
+        pattern.allMatches(d).map((match) => match.group(0)!).toList();
     if (tokens.isEmpty) return const [];
 
     final points = <Offset>[];
@@ -299,18 +311,21 @@ class BeaconPlacementGenerator {
     return {'M', 'm', 'L', 'l', 'H', 'h', 'V', 'v', 'Z', 'z'}.contains(token);
   }
 
-  Future<List<BeaconPlacementSuggestion>> generate(StoreMap storeMap, {int? desiredCount}) async {
+  Future<List<BeaconPlacementSuggestion>> generate(StoreMap storeMap,
+      {int? desiredCount}) async {
     final segments = await loadWalkableSegments(storeMap.mapAsset);
     if (segments.isEmpty) {
       return const <BeaconPlacementSuggestion>[];
     }
 
     final config = storeMap.beaconPlacement;
-    final junctions = inferJunctions(segments, toleranceUnits: config.axisToleranceUnits);
+    final junctions =
+        inferJunctions(segments, toleranceUnits: config.axisToleranceUnits);
     final orderedPoints = <_PointOnPath>[];
 
     for (final segment in segments) {
-      orderedPoints.addAll(sampleSegmentAnchors(segment, config, storeMap.metersPerUnit));
+      orderedPoints.addAll(
+          sampleSegmentAnchors(segment, config, storeMap.metersPerUnit));
     }
 
     for (final junction in junctions) {
@@ -327,8 +342,11 @@ class BeaconPlacementGenerator {
       );
     }
 
-    final dedupeRadiusUnits = (config.dedupeRadiusMeters / storeMap.metersPerUnit).clamp(0.0, double.infinity);
-    final unique = _dedupeNearestPoints(orderedPoints, dedupeRadiusUnits: dedupeRadiusUnits)
+    final dedupeRadiusUnits =
+        (config.dedupeRadiusMeters / storeMap.metersPerUnit)
+            .clamp(0.0, double.infinity);
+    final unique = _dedupeNearestPoints(orderedPoints,
+        dedupeRadiusUnits: dedupeRadiusUnits)
       ..sort((a, b) {
         final y = a.position.dy.compareTo(b.position.dy);
         if (y != 0) return y;
@@ -336,7 +354,8 @@ class BeaconPlacementGenerator {
       });
 
     final effectiveDesiredCount = desiredCount ?? config.desiredBeaconCount;
-    final prioritized = _prioritizeAnchors(unique, junctions, toleranceUnits: config.axisToleranceUnits)
+    final prioritized = _prioritizeAnchors(unique, junctions,
+        toleranceUnits: config.axisToleranceUnits)
       ..sort((a, b) {
         final aPriority = a.segmentLabel == 'junction' ? 0 : 1;
         final bPriority = b.segmentLabel == 'junction' ? 0 : 1;
@@ -360,7 +379,9 @@ class BeaconPlacementGenerator {
     for (var i = 0; i < spacedPoints.length; i++) {
       final point = spacedPoints[i];
       final previous = suggestions.isEmpty ? null : suggestions.last.position;
-      final gapMeters = previous == null ? 0.0 : (point.position - previous).distance * storeMap.metersPerUnit;
+      final gapMeters = previous == null
+          ? 0.0
+          : (point.position - previous).distance * storeMap.metersPerUnit;
 
       suggestions.add(
         BeaconPlacementSuggestion(
@@ -379,15 +400,14 @@ class BeaconPlacementGenerator {
     List<Offset> junctions, {
     required double toleranceUnits,
   }) {
-    final ranked = points
-        .map((point) {
-          final isJunction = junctions.any((junction) => (junction - point.position).distance <= toleranceUnits);
-          return (
-            point: point,
-            priority: isJunction ? 0 : 1,
-          );
-        })
-        .toList();
+    final ranked = points.map((point) {
+      final isJunction = junctions.any(
+          (junction) => (junction - point.position).distance <= toleranceUnits);
+      return (
+        point: point,
+        priority: isJunction ? 0 : 1,
+      );
+    }).toList();
 
     ranked.sort((a, b) {
       if (a.priority != b.priority) return a.priority.compareTo(b.priority);
@@ -405,7 +425,8 @@ class BeaconPlacementGenerator {
   }) {
     final deduped = <_PointOnPath>[];
     for (final point in points) {
-      final exists = deduped.any((existing) => (existing.position - point.position).distance <= dedupeRadiusUnits);
+      final exists = deduped.any((existing) =>
+          (existing.position - point.position).distance <= dedupeRadiusUnits);
       if (!exists) deduped.add(point);
     }
     return deduped;
@@ -420,7 +441,8 @@ class BeaconPlacementGenerator {
     final filtered = <_PointOnPath>[];
     for (final point in points) {
       final tooClose = filtered.any(
-        (existing) => (existing.position - point.position).distance < minSpacingUnits,
+        (existing) =>
+            (existing.position - point.position).distance < minSpacingUnits,
       );
       if (!tooClose) {
         filtered.add(point);
@@ -435,8 +457,10 @@ class BeaconPlacementGenerator {
     double xOffset = 0,
     double yOffset = 0,
   }) {
-    final x = segment.startX + (segment.endX - segment.startX) * ratio + xOffset;
-    final y = segment.startY + (segment.endY - segment.startY) * ratio + yOffset;
+    final x =
+        segment.startX + (segment.endX - segment.startX) * ratio + xOffset;
+    final y =
+        segment.startY + (segment.endY - segment.startY) * ratio + yOffset;
 
     return _PointOnPath(
       position: Offset(x, y),

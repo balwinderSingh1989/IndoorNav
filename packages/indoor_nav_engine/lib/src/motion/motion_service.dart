@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:io' show Platform;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_compass/flutter_compass.dart';
@@ -93,12 +94,16 @@ class MotionService {
   /// same reasoning as [BleScannerService.errors].
   Stream<String> get errors => _errorController.stream;
 
-
-
   Future<void> start() async {
-    final status = await Permission.activityRecognition.request();
+    final status = await (Platform.isIOS
+        ? Permission.sensors.request()
+        : Permission.activityRecognition.request());
     if (!status.isGranted) {
-      _errorController.add('Motion permission denied — step tracking disabled. Grant it in system settings.');
+      _errorController.add(
+        Platform.isIOS
+            ? 'Motion permission denied — enable this app in Settings > Privacy & Security > Motion & Fitness.'
+            : 'Motion permission denied — step tracking disabled. Grant it in system settings.',
+      );
       return;
     }
 
@@ -122,10 +127,7 @@ class MotionService {
     _pedestrianStatusStream = await Pedometer.pedestrianStatusStream;
 
     _pedestrianStatusStream?.listen(onPedestrianStatusChanged);
-
-
   }
-
 
   void onPedestrianStatusChanged(PedestrianStatus event) {
     String status = event.status;
@@ -144,7 +146,8 @@ class MotionService {
       // TYPE_STEP_COUNTER hardware), and no amount of navigation-logic
       // tuning will fix that; it needs a physical device or a fake/injected
       // step source for testing.
-      debugPrint('NAV## [MOTION] Step counter baseline received: ${event.steps} total steps');
+      debugPrint(
+          'NAV## [MOTION] Step counter baseline received: ${event.steps} total steps');
       return;
     }
 
@@ -154,12 +157,11 @@ class MotionService {
     if (newSteps > _maxStepBurst) {
       _errorController.add(
         'Step counter reported a $newSteps-step burst (likely a backgrounding '
-            'catch-up) — capping at $_maxStepBurst to avoid an implausible '
-            'single-tick distance jump.',
+        'catch-up) — capping at $_maxStepBurst to avoid an implausible '
+        'single-tick distance jump.',
       );
       newSteps = _maxStepBurst;
     }
-
 
     debugPrint('NAV## [MOTION] newSteps: ${newSteps}');
     for (var i = 0; i < newSteps; i++) {
@@ -172,13 +174,15 @@ class MotionService {
   /// mean would be), then clamps the result to a physically plausible human
   /// stride range so a single bad sample can't poison every later distance
   /// estimate.
-  void recordStrideCalibration({required double distanceMeters, required int steps}) {
+  void recordStrideCalibration(
+      {required double distanceMeters, required int steps}) {
     if (distanceMeters <= 0 || steps <= 0) return;
     _strideSamples.add(distanceMeters / steps);
     if (_strideSamples.length > 9) _strideSamples.removeAt(0);
     final sorted = List<double>.from(_strideSamples)..sort();
     final median = sorted[sorted.length ~/ 2];
-    _calibratedStepLengthMeters = median.clamp(_minStepLengthMeters, _maxStepLengthMeters);
+    _calibratedStepLengthMeters =
+        median.clamp(_minStepLengthMeters, _maxStepLengthMeters);
   }
 
   /// Integrates rotation rate into the fused heading — fires far more
@@ -192,10 +196,12 @@ class MotionService {
     final last = _lastGyroTime;
     _lastGyroTime = now;
     final current = _fusedHeadingDegrees;
-    if (last == null || current == null) return; // Need a compass fix to anchor to first.
+    if (last == null || current == null)
+      return; // Need a compass fix to anchor to first.
 
     final dtSeconds = now.difference(last).inMicroseconds / 1e6;
-    if (dtSeconds <= 0 || dtSeconds > 0.5) return; // Skip large gaps (e.g. app backgrounded).
+    if (dtSeconds <= 0 || dtSeconds > 0.5)
+      return; // Skip large gaps (e.g. app backgrounded).
 
     // event.z is rotation rate (rad/s) around the phone's vertical axis
     // when held flat, positive = counter-clockwise; compass heading
@@ -215,18 +221,23 @@ class MotionService {
     if (heading == null) return;
 
     final current = _fusedHeadingDegrees;
-    _fusedHeadingDegrees = current == null ? heading : _blendHeading(current, heading, weight: 0.08);
+    _fusedHeadingDegrees = current == null
+        ? heading
+        : _blendHeading(current, heading, weight: 0.08);
     _headingController.add(_fusedHeadingDegrees!);
   }
 
   /// Circular blend (handles the 0°/360° wraparound correctly by averaging
   /// in Cartesian/unit-vector space) — naively averaging e.g. 350° and 10°
   /// would otherwise give 180° instead of ~0°.
-  double _blendHeading(double base, double correction, {required double weight}) {
+  double _blendHeading(double base, double correction,
+      {required double weight}) {
     final baseRad = base * math.pi / 180;
     final correctionRad = correction * math.pi / 180;
-    final x = (1 - weight) * math.cos(baseRad) + weight * math.cos(correctionRad);
-    final y = (1 - weight) * math.sin(baseRad) + weight * math.sin(correctionRad);
+    final x =
+        (1 - weight) * math.cos(baseRad) + weight * math.cos(correctionRad);
+    final y =
+        (1 - weight) * math.sin(baseRad) + weight * math.sin(correctionRad);
     return _wrapDegrees(math.atan2(y, x) * 180 / math.pi);
   }
 
