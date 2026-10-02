@@ -35,7 +35,8 @@ class CatalogApiService {
   /// `http.Client` calls have no timeout of their own.
   static const _requestTimeout = Duration(seconds: 25);
 
-  Future<Map<String, dynamic>> _invoke(String workflow, Map<String, dynamic> input) async {
+  Future<Map<String, dynamic>> _invoke(
+      String workflow, Map<String, dynamic> input) async {
     final http.Response response;
     try {
       response = await _client
@@ -49,24 +50,29 @@ class CatalogApiService {
           )
           .timeout(_requestTimeout);
     } on TimeoutException {
-      throw const CatalogApiException('Product catalog took too long to respond. Try again.');
+      throw const CatalogApiException(
+          'Product catalog took too long to respond. Try again.');
     } catch (_) {
-      throw const CatalogApiException('Could not reach the product catalog. Check your connection.');
+      throw const CatalogApiException(
+          'Could not reach the product catalog. Check your connection.');
     }
 
     if (response.statusCode != 200) {
-      throw CatalogApiException('Product catalog request failed (${response.statusCode}).');
+      throw CatalogApiException(
+          'Product catalog request failed (${response.statusCode}).');
     }
 
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     if (body['success'] != true) {
-      throw const CatalogApiException('Product catalog request was unsuccessful.');
+      throw const CatalogApiException(
+          'Product catalog request was unsuccessful.');
     }
 
     final data = body['data'] as Map<String, dynamic>?;
     final result = data?['result'] as Map<String, dynamic>?;
     if (result == null) {
-      throw const CatalogApiException('Product catalog returned an unexpected response.');
+      throw const CatalogApiException(
+          'Product catalog returned an unexpected response.');
     }
     return result;
   }
@@ -80,9 +86,12 @@ class CatalogApiService {
   }
 
   Future<List<Product>> getProductListing(int categoryId) async {
-    final result = await _invoke('get-product-listing', {'categoryId': categoryId});
+    final result =
+        await _invoke('get-product-listing', {'categoryId': categoryId});
     final products = result['products'] as List? ?? const [];
-    return products.map((p) => Product.fromJson(p as Map<String, dynamic>)).toList();
+    return products
+        .map((p) => Product.fromJson(p as Map<String, dynamic>))
+        .toList();
   }
 
   /// [getProductListing] keyed by a category from the tree, with fallbacks
@@ -131,10 +140,14 @@ class CatalogApiService {
     }
   }
 
-  Future<List<Product>> searchProducts(String query, {String lang = 'en'}) async {
-    final result = await _invoke('search-query-api-deployment', {'UserQuery': query, 'Lang': lang});
+  Future<List<Product>> searchProducts(String query,
+      {String lang = 'en'}) async {
+    final result = await _invoke(
+        'search-query-api-deployment', {'UserQuery': query, 'Lang': lang});
     final products = result['products'] as List? ?? const [];
-    return products.map((p) => Product.fromJson(p as Map<String, dynamic>)).toList();
+    return products
+        .map((p) => Product.fromJson(p as Map<String, dynamic>))
+        .toList();
   }
 
   void dispose() => _client.close();

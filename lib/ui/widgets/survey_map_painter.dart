@@ -50,7 +50,9 @@ class SurveyMapPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round;
     for (final trajectory in trajectories) {
       if (trajectory.positions.length < 2) continue;
-      final path = Path()..moveTo(scale(trajectory.positions.first).dx, scale(trajectory.positions.first).dy);
+      final path = Path()
+        ..moveTo(scale(trajectory.positions.first).dx,
+            scale(trajectory.positions.first).dy);
       for (final position in trajectory.positions.skip(1)) {
         final point = scale(position);
         path.lineTo(point.dx, point.dy);
@@ -83,7 +85,8 @@ class SurveyMapPainter extends CustomPainter {
           point,
           radius,
           Paint()
-            ..color = Colors.amber.withValues(alpha: 0.9 - highlightProgress * 0.45)
+            ..color =
+                Colors.amber.withValues(alpha: 0.9 - highlightProgress * 0.45)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 4,
         );
@@ -107,8 +110,12 @@ class SurveyMapPainter extends CustomPainter {
       for (var y = 0.0; y < mapSize.height; y += cellSize) {
         if (covered.contains('${x ~/ cellSize}:${y ~/ cellSize}')) continue;
         final topLeft = scale(Offset(x, y));
-        final bottomRight = scale(Offset(math.min(x + cellSize, mapSize.width), math.min(y + cellSize, mapSize.height)));
-        canvas.drawRect(Rect.fromLTRB(topLeft.dx, topLeft.dy, bottomRight.dx, bottomRight.dy), paint);
+        final bottomRight = scale(Offset(math.min(x + cellSize, mapSize.width),
+            math.min(y + cellSize, mapSize.height)));
+        canvas.drawRect(
+            Rect.fromLTRB(
+                topLeft.dx, topLeft.dy, bottomRight.dx, bottomRight.dy),
+            paint);
       }
     }
   }
@@ -117,21 +124,27 @@ class SurveyMapPainter extends CustomPainter {
     final bins = <String, List<Offset>>{};
     const cellSize = 18.0;
     for (final trajectory in trajectories) {
-      for (var i = 0; i < trajectory.samples.length && i < trajectory.positions.length; i++) {
+      for (var i = 0;
+          i < trajectory.samples.length && i < trajectory.positions.length;
+          i++) {
         final magnitude = trajectory.samples[i].magnitude;
         if (magnitude < 35 || magnitude > 55) continue;
-        bins.putIfAbsent(_cellKey(trajectory.positions[i], cellSize), () => []).add(trajectory.positions[i]);
+        bins
+            .putIfAbsent(_cellKey(trajectory.positions[i], cellSize), () => [])
+            .add(trajectory.positions[i]);
       }
     }
     final paint = Paint()..color = Colors.orange.withValues(alpha: 0.22);
     for (final positions in bins.values) {
       if (positions.length < 2) continue;
-      final center = positions.reduce((a, b) => a + b) / positions.length.toDouble();
+      final center =
+          positions.reduce((a, b) => a + b) / positions.length.toDouble();
       canvas.drawCircle(scale(center), 9, paint);
     }
   }
 
-  String _cellKey(Offset point, double cellSize) => '${point.dx ~/ cellSize}:${point.dy ~/ cellSize}';
+  String _cellKey(Offset point, double cellSize) =>
+      '${point.dx ~/ cellSize}:${point.dy ~/ cellSize}';
 
   @override
   bool shouldRepaint(covariant SurveyMapPainter oldDelegate) =>

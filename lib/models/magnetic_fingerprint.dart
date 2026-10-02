@@ -60,7 +60,10 @@ class MagneticFingerprint {
 }
 
 class MagneticMatch {
-  const MagneticMatch({required this.position, required this.distance, required this.fingerprintId});
+  const MagneticMatch(
+      {required this.position,
+      required this.distance,
+      required this.fingerprintId});
 
   final Offset position;
   final double distance;
@@ -88,10 +91,14 @@ class MagneticTrajectory {
       id: json['id'] as String,
       floorId: json['floorId'] as String? ?? 'default-floor',
       capturedAt: DateTime.parse(json['capturedAt'] as String),
-      samples: (json['samples'] as List<dynamic>).map((sample) => MagneticSample.fromJson(sample as Map<String, dynamic>)).toList(),
+      samples: (json['samples'] as List<dynamic>)
+          .map((sample) =>
+              MagneticSample.fromJson(sample as Map<String, dynamic>))
+          .toList(),
       positions: rawPositions.map((position) {
         final value = position as Map<String, dynamic>;
-        return Offset((value['x'] as num).toDouble(), (value['y'] as num).toDouble());
+        return Offset(
+            (value['x'] as num).toDouble(), (value['y'] as num).toDouble());
       }).toList(),
     );
   }
@@ -101,12 +108,18 @@ class MagneticTrajectory {
         'floorId': floorId,
         'capturedAt': capturedAt.toIso8601String(),
         'samples': samples.map((sample) => sample.toJson()).toList(),
-        'positions': positions.map((position) => {'x': position.dx, 'y': position.dy}).toList(),
+        'positions': positions
+            .map((position) => {'x': position.dx, 'y': position.dy})
+            .toList(),
       };
 }
 
 class MagneticTrajectoryMatch {
-  const MagneticTrajectoryMatch({required this.position, required this.distance, required this.trajectoryId, required this.confidence});
+  const MagneticTrajectoryMatch(
+      {required this.position,
+      required this.distance,
+      required this.trajectoryId,
+      required this.confidence});
 
   final Offset position;
   final double distance;

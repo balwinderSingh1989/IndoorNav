@@ -45,16 +45,23 @@ class WifiFingerprintController extends ChangeNotifier {
 
   int get fingerprintCount => service.fingerprints.length;
   int get captureSampleCount => _captureSamples.length;
-  bool get pointCaptureTargetReached => _captureSamples.length >= targetPointSampleCount;
-  int get captureUniqueRssiVectorCount => _captureSamples.map((sample) => sample.rssiByBssid.toString()).toSet().length;
+  bool get pointCaptureTargetReached =>
+      _captureSamples.length >= targetPointSampleCount;
+  int get captureUniqueRssiVectorCount => _captureSamples
+      .map((sample) => sample.rssiByBssid.toString())
+      .toSet()
+      .length;
   int get captureSamplesPerPoint => _captureSamples.length;
   int get lastCompletedSampleCount => _lastCompletedSampleCount;
   int get lastCompletedUniqueVectorCount => _lastCompletedUniqueVectorCount;
   DateTime? get latestScanRequestedAt => latestObservation?.scanRequestedAt;
-  int? get latestScanResultTimestampMicros => latestObservation?.scanResultTimestampMicros;
+  int? get latestScanResultTimestampMicros =>
+      latestObservation?.scanResultTimestampMicros;
   int get visibleAccessPointCount => latestObservation?.rssiByBssid.length ?? 0;
-  Map<String, double> get visibleAccessPoints => latestObservation?.rssiByBssid ?? const {};
-  Map<String, String> get visibleAccessPointNames => latestObservation?.ssidByBssid ?? const {};
+  Map<String, double> get visibleAccessPoints =>
+      latestObservation?.rssiByBssid ?? const {};
+  Map<String, String> get visibleAccessPointNames =>
+      latestObservation?.ssidByBssid ?? const {};
   bool get hasSelectedAccessPoints => selectedBssids.isNotEmpty;
   bool get hasSelectedAnchors => anchorBssids.isNotEmpty;
   bool get hasSavedSsidDefaults => _hasSavedSsidDefaults;
@@ -71,9 +78,12 @@ class WifiFingerprintController extends ChangeNotifier {
 
   Future<void> start() async {
     final preferences = await SharedPreferences.getInstance();
-    final savedNames = preferences.getStringList(_savedSsidNamesKey) ?? const <String>[];
-    final savedAnchors = preferences.getStringList(_savedAnchorBssidsKey) ?? const <String>[];
-    final savedAnchorNames = preferences.getStringList(_savedAnchorNamesKey) ?? const <String>[];
+    final savedNames =
+        preferences.getStringList(_savedSsidNamesKey) ?? const <String>[];
+    final savedAnchors =
+        preferences.getStringList(_savedAnchorBssidsKey) ?? const <String>[];
+    final savedAnchorNames =
+        preferences.getStringList(_savedAnchorNamesKey) ?? const <String>[];
     selectedSsidNames
       ..clear()
       ..addAll(savedNames);
@@ -85,7 +95,8 @@ class WifiFingerprintController extends ChangeNotifier {
       ..clear()
       ..addEntries(savedAnchorNames.map((value) {
         final separator = value.indexOf('|');
-        return MapEntry(separator < 0 ? value : value.substring(0, separator), separator < 0 ? value : value.substring(separator + 1));
+        return MapEntry(separator < 0 ? value : value.substring(0, separator),
+            separator < 0 ? value : value.substring(separator + 1));
       }));
     await service.loadPersisted();
     await service.start();
@@ -95,7 +106,8 @@ class WifiFingerprintController extends ChangeNotifier {
   static const _savedAnchorBssidsKey = 'wifi_anchor_bssids';
   static const _savedAnchorNamesKey = 'wifi_anchor_names';
 
-  String anchorDisplayName(String bssid) => anchorNames[bssid] ?? visibleAccessPointNames[bssid] ?? bssid;
+  String anchorDisplayName(String bssid) =>
+      anchorNames[bssid] ?? visibleAccessPointNames[bssid] ?? bssid;
 
   void selectCapturePoint(Offset position) {
     if (isCapturing) return;
@@ -110,7 +122,8 @@ class WifiFingerprintController extends ChangeNotifier {
   }
 
   void beginCapture() {
-    if (isCapturing || selectedPosition == null || selectedBssids.isEmpty) return;
+    if (isCapturing || selectedPosition == null || selectedBssids.isEmpty)
+      return;
     _captureSamples.clear();
     isCapturing = true;
     errorMessage = null;
@@ -136,7 +149,10 @@ class WifiFingerprintController extends ChangeNotifier {
     final position = selectedPosition;
     if (position != null && _captureSamples.isNotEmpty) {
       _recordCaptureQuality();
-      service.addFingerprint(floorId: 'default-floor', position: position, samples: _captureSamples);
+      service.addFingerprint(
+          floorId: 'default-floor',
+          position: position,
+          samples: _captureSamples);
     }
     isCapturing = false;
     selectedPosition = null;
@@ -167,10 +183,12 @@ class WifiFingerprintController extends ChangeNotifier {
     if (count == 0) return const [];
     final lengths = <double>[0];
     for (var i = 1; i < _captureRoutePoints.length; i++) {
-      lengths.add(lengths.last + (_captureRoutePoints[i] - _captureRoutePoints[i - 1]).distance);
+      lengths.add(lengths.last +
+          (_captureRoutePoints[i] - _captureRoutePoints[i - 1]).distance);
     }
     final total = lengths.last;
-    if (total == 0) return List<Offset>.filled(count, _captureRoutePoints.first);
+    if (total == 0)
+      return List<Offset>.filled(count, _captureRoutePoints.first);
     return List.generate(count, (index) {
       final distance = total * (count == 1 ? 0 : index / (count - 1));
       var segment = 1;
@@ -178,8 +196,11 @@ class WifiFingerprintController extends ChangeNotifier {
         segment++;
       }
       final segmentLength = lengths[segment] - lengths[segment - 1];
-      final fraction = segmentLength == 0 ? 0.0 : (distance - lengths[segment - 1]) / segmentLength;
-      return Offset.lerp(_captureRoutePoints[segment - 1], _captureRoutePoints[segment], fraction)!;
+      final fraction = segmentLength == 0
+          ? 0.0
+          : (distance - lengths[segment - 1]) / segmentLength;
+      return Offset.lerp(_captureRoutePoints[segment - 1],
+          _captureRoutePoints[segment], fraction)!;
     });
   }
 
@@ -190,7 +211,8 @@ class WifiFingerprintController extends ChangeNotifier {
     }
     for (final entry in observation.rssiByBssid.entries) {
       final ssid = observation.ssidByBssid[entry.key]?.trim() ?? '';
-      if (_hasSavedSsidDefaults && selectedSsidNames.contains(ssid)) selectedBssids.add(entry.key);
+      if (_hasSavedSsidDefaults && selectedSsidNames.contains(ssid))
+        selectedBssids.add(entry.key);
     }
     final filtered = _filter(observation.rssiByBssid);
     final selectedObservation = WifiObservation(
@@ -198,17 +220,22 @@ class WifiFingerprintController extends ChangeNotifier {
       rssiByBssid: filtered,
       ssidByBssid: {
         for (final bssid in filtered.keys)
-          if (observation.ssidByBssid.containsKey(bssid)) bssid: observation.ssidByBssid[bssid]!,
+          if (observation.ssidByBssid.containsKey(bssid))
+            bssid: observation.ssidByBssid[bssid]!,
       },
       scanRequestedAt: observation.scanRequestedAt,
       scanResultTimestampMicros: observation.scanResultTimestampMicros,
     );
     if (isCapturing) _captureSamples.add(selectedObservation);
-    if (isCapturing && _captureRoutePoints.isEmpty && pointCaptureTargetReached) {
+    if (isCapturing &&
+        _captureRoutePoints.isEmpty &&
+        pointCaptureTargetReached) {
       finishCapture();
       return;
     }
-    final match = service.match(filtered, weighted: matchingMode == WifiMatchingMode.weightedKnn, allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
+    final match = service.match(filtered,
+        weighted: matchingMode == WifiMatchingMode.weightedKnn,
+        allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
     if (match != null && match.confidence >= 0.35) {
       currentMatch = match;
       final previous = estimatedPosition;
@@ -252,13 +279,15 @@ class WifiFingerprintController extends ChangeNotifier {
     }
     _hasSavedSsidDefaults = true;
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setStringList(_savedSsidNamesKey, selectedSsidNames.toList()..sort());
+    await preferences.setStringList(
+        _savedSsidNamesKey, selectedSsidNames.toList()..sort());
     notifyListeners();
   }
 
   bool isSsidSelected(String ssid) => selectedSsidNames.contains(ssid);
 
-  Future<void> setNetworkGroupSelected(String groupKey, Iterable<String> bssids, bool selected) async {
+  Future<void> setNetworkGroupSelected(
+      String groupKey, Iterable<String> bssids, bool selected) async {
     if (isCapturing) return;
     final groupBssids = bssids.toSet();
     if (selected) {
@@ -270,7 +299,8 @@ class WifiFingerprintController extends ChangeNotifier {
     }
     _hasSavedSsidDefaults = true;
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setStringList(_savedSsidNamesKey, selectedSsidNames.toList()..sort());
+    await preferences.setStringList(
+        _savedSsidNamesKey, selectedSsidNames.toList()..sort());
     notifyListeners();
   }
 
@@ -284,10 +314,13 @@ class WifiFingerprintController extends ChangeNotifier {
       selectedBssids.remove(bssid);
     }
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setStringList(_savedAnchorBssidsKey, anchorBssids.toList()..sort());
+    await preferences.setStringList(
+        _savedAnchorBssidsKey, anchorBssids.toList()..sort());
     final latest = latestObservation;
     if (latest != null) {
-      currentMatch = service.match(_filter(latest.rssiByBssid), weighted: matchingMode == WifiMatchingMode.weightedKnn, allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
+      currentMatch = service.match(_filter(latest.rssiByBssid),
+          weighted: matchingMode == WifiMatchingMode.weightedKnn,
+          allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
       estimatedPosition = currentMatch?.position;
     }
     notifyListeners();
@@ -300,7 +333,8 @@ class WifiFingerprintController extends ChangeNotifier {
       ..addAll(bssids);
     selectedBssids.addAll(anchorBssids);
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setStringList(_savedAnchorBssidsKey, anchorBssids.toList()..sort());
+    await preferences.setStringList(
+        _savedAnchorBssidsKey, anchorBssids.toList()..sort());
     final latest = latestObservation;
     if (latest != null) {
       currentMatch = service.match(
@@ -320,7 +354,12 @@ class WifiFingerprintController extends ChangeNotifier {
       anchorNames[bssid] = name.trim();
     }
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setStringList(_savedAnchorNamesKey, anchorNames.entries.map((entry) => '${entry.key}|${entry.value}').toList()..sort());
+    await preferences.setStringList(
+        _savedAnchorNamesKey,
+        anchorNames.entries
+            .map((entry) => '${entry.key}|${entry.value}')
+            .toList()
+          ..sort());
     notifyListeners();
   }
 
@@ -329,7 +368,9 @@ class WifiFingerprintController extends ChangeNotifier {
     matchingMode = mode;
     final latest = latestObservation;
     if (latest != null) {
-      currentMatch = service.match(_filter(latest.rssiByBssid), weighted: mode == WifiMatchingMode.weightedKnn, allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
+      currentMatch = service.match(_filter(latest.rssiByBssid),
+          weighted: mode == WifiMatchingMode.weightedKnn,
+          allowedBssids: hasSelectedAnchors ? anchorBssids : selectedBssids);
       if (currentMatch == null || currentMatch!.confidence < 0.35) {
         currentMatch = null;
       } else {
