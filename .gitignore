@@ -2,6 +2,7 @@
 *.class
 *.log
 *.pyc
+*.bak
 *.swp
 .DS_Store
 .atom/
@@ -31,6 +32,8 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+**/build/
+**/.gradle/
 local_packages/**/build/
 /coverage/
 
@@ -46,3 +49,7 @@ app.*.map.json
 /android/app/release
 # Added by code-review-graph
 .code-review-graph/
+
+# Local tool/editor state
+.kiro/settings/
+**/xcshareddata/swiftpm/
