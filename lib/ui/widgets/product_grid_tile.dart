@@ -5,7 +5,8 @@ import '../../models/product.dart';
 /// An Amazon-style catalog tile: product image on top, name/brand/price
 /// below. Used for both category product listings and search results.
 class ProductGridTile extends StatelessWidget {
-  const ProductGridTile({super.key, required this.product, required this.onTap, this.location});
+  const ProductGridTile(
+      {super.key, required this.product, required this.onTap, this.location});
 
   final Product product;
   final VoidCallback onTap;
@@ -39,19 +40,22 @@ class ProductGridTile extends StatelessWidget {
                 width: double.infinity,
                 color: colorScheme.surfaceContainerHighest,
                 child: product.image == null
-                    ? Icon(Icons.inventory_2_outlined, color: colorScheme.onSurfaceVariant)
+                    ? Icon(Icons.inventory_2_outlined,
+                        color: colorScheme.onSurfaceVariant)
                     : Image.network(
                         product.image!,
                         fit: BoxFit.contain,
-                        errorBuilder: (context, error, stackTrace) =>
-                            Icon(Icons.broken_image_outlined, color: colorScheme.onSurfaceVariant),
+                        errorBuilder: (context, error, stackTrace) => Icon(
+                            Icons.broken_image_outlined,
+                            color: colorScheme.onSurfaceVariant),
                         loadingBuilder: (context, child, progress) {
                           if (progress == null) return child;
                           return Center(
                             child: SizedBox(
                               width: 20,
                               height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: colorScheme.primary),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: colorScheme.primary),
                             ),
                           );
                         },
@@ -69,20 +73,23 @@ class ProductGridTile extends StatelessWidget {
                       product.brand,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: textTheme.labelSmall?.copyWith(color: colorScheme.onSurfaceVariant),
+                      style: textTheme.labelSmall
+                          ?.copyWith(color: colorScheme.onSurfaceVariant),
                     ),
                   Text(
                     product.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                    style: textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
                       Text(
                         '${product.currency} ${product.displayPrice.toStringAsFixed(0)}',
-                        style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                        style: textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w700),
                       ),
                       if (product.isOnSale) ...[
                         const SizedBox(width: 6),
@@ -101,7 +108,8 @@ class ProductGridTile extends StatelessWidget {
                       padding: const EdgeInsets.only(top: 2),
                       child: Text(
                         'Out of stock',
-                        style: textTheme.labelSmall?.copyWith(color: colorScheme.error),
+                        style: textTheme.labelSmall
+                            ?.copyWith(color: colorScheme.error),
                       ),
                     ),
                   if (location != null)
@@ -109,15 +117,17 @@ class ProductGridTile extends StatelessWidget {
                       padding: const EdgeInsets.only(top: 4),
                       child: Row(
                         children: [
-                          Icon(Icons.place_outlined, size: 12, color: colorScheme.primary),
+                          Icon(Icons.place_outlined,
+                              size: 12, color: colorScheme.primary),
                           const SizedBox(width: 3),
                           Expanded(
                             child: Text(
                               location!,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: textTheme.labelSmall
-                                  ?.copyWith(color: colorScheme.primary, fontWeight: FontWeight.w600),
+                              style: textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.w600),
                             ),
                           ),
                         ],

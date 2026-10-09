@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/product.dart';
 import '../../models/product_category.dart';
-import '../../models/store_map.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../../services/catalog_api_service.dart';
 import '../utils/zone_assignment.dart';
 import '../widgets/product_grid_tile.dart';
@@ -75,10 +75,12 @@ class _ProductListingScreenState extends State<ProductListingScreen> {
                       Text(
                         '${snapshot.error}',
                         textAlign: TextAlign.center,
-                        style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+                        style: textTheme.bodyMedium
+                            ?.copyWith(color: colorScheme.onSurfaceVariant),
                       ),
                       const SizedBox(height: 12),
-                      FilledButton(onPressed: _retry, child: const Text('Retry')),
+                      FilledButton(
+                          onPressed: _retry, child: const Text('Retry')),
                     ],
                   ),
                 ),
@@ -89,7 +91,8 @@ class _ProductListingScreenState extends State<ProductListingScreen> {
               return Center(
                 child: Text(
                   'No products in this category yet',
-                  style: textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
+                  style: textTheme.bodyMedium
+                      ?.copyWith(color: colorScheme.onSurfaceVariant),
                 ),
               );
             }

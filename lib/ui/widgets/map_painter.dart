@@ -2,8 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../../models/beacon.dart';
-import '../../models/store_map.dart' show Edge;
+import 'package:indoor_nav_engine/indoor_nav_engine.dart' show Beacon, Edge;
 
 /// Draws the live user pin and the turn-by-turn route line on top of the
 /// store's SVG floor plan. Coordinates are in the map's native SVG space;
@@ -17,6 +16,10 @@ class MapPainter extends CustomPainter {
     this.livePosition,
     this.headingDegrees,
     this.mapNorthOffsetDegrees = 0,
+    this.capturePosition,
+    this.capturePath = const [],
+    this.anchorPosition,
+    this.anchorLabel,
   });
 
   final Size mapSize;
@@ -43,6 +46,13 @@ class MapPainter extends CustomPainter {
   /// used to convert [headingDegrees] into the map's coordinate frame.
   final double mapNorthOffsetDegrees;
 
+  /// User-selected map coordinate awaiting a labeled magnetic capture.
+  final Offset? capturePosition;
+
+  final List<Offset> capturePath;
+  final Offset? anchorPosition;
+  final String? anchorLabel;
+
   @override
   void paint(Canvas canvas, Size size) {
     final scaleX = size.width / mapSize.width;
@@ -68,9 +78,11 @@ class MapPainter extends CustomPainter {
           ..strokeJoin = StrokeJoin.round;
 
         final routePath = Path()
-          ..moveTo(scale(path.first.position).dx, scale(path.first.position).dy);
+          ..moveTo(
+              scale(path.first.position).dx, scale(path.first.position).dy);
         for (var i = 0; i < path.length - 1; i++) {
-          for (final waypoint in _orderedWaypoints(path[i].id, path[i + 1].id)) {
+          for (final waypoint
+              in _orderedWaypoints(path[i].id, path[i + 1].id)) {
             final wp = scale(waypoint);
             routePath.lineTo(wp.dx, wp.dy);
           }
@@ -106,10 +118,71 @@ class MapPainter extends CustomPainter {
         final next = user == null ? null : _nextWaypoint(user);
         if (next != null) {
           final target = scale(next.position);
-          _drawDirectionArrow(canvas, from: p, angle: math.atan2(target.dy - p.dy, target.dx - p.dx));
+          _drawDirectionArrow(canvas,
+              from: p, angle: math.atan2(target.dy - p.dy, target.dx - p.dx));
         } else {
           canvas.drawCircle(p, 7.5, Paint()..color = Colors.redAccent);
         }
+      }
+    }
+
+    final selected = capturePosition;
+    if (selected != null) {
+      final p = scale(selected);
+      final paint = Paint()
+        ..color = Colors.amber
+        ..strokeWidth = 3
+        ..style = PaintingStyle.stroke;
+      canvas.drawCircle(p, 12, paint);
+      canvas.drawLine(Offset(p.dx - 17, p.dy), Offset(p.dx + 17, p.dy), paint);
+      canvas.drawLine(Offset(p.dx, p.dy - 17), Offset(p.dx, p.dy + 17), paint);
+    }
+
+    if (capturePath.length > 1) {
+      final routePaint = Paint()
+        ..color = Colors.amber
+        ..strokeWidth = 4
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+      final route = Path()
+        ..moveTo(scale(capturePath.first).dx, scale(capturePath.first).dy);
+      for (final point in capturePath.skip(1)) {
+        final scaled = scale(point);
+        route.lineTo(scaled.dx, scaled.dy);
+      }
+      canvas.drawPath(route, routePaint);
+      for (final point in capturePath) {
+        canvas.drawCircle(scale(point), 6, Paint()..color = Colors.white);
+        canvas.drawCircle(
+            scale(point), 4, Paint()..color = Colors.amber.shade800);
+      }
+    }
+
+    final anchor = anchorPosition;
+    if (anchor != null) {
+      final point = scale(anchor);
+      canvas.drawCircle(
+          point,
+          15,
+          Paint()
+            ..color = Colors.blueAccent
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3);
+      canvas.drawCircle(point, 5, Paint()..color = Colors.blueAccent);
+      final label = anchorLabel;
+      if (label != null && label.isNotEmpty) {
+        final painter = TextPainter(
+          text: TextSpan(
+              text: label,
+              style: const TextStyle(
+                  color: Colors.blueAccent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold)),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: 140);
+        painter.paint(
+            canvas, Offset(point.dx + 10, point.dy - painter.height - 8));
       }
     }
   }
@@ -121,7 +194,8 @@ class MapPainter extends CustomPainter {
   List<Offset> _orderedWaypoints(String aId, String bId) {
     for (final edge in edges) {
       if (edge.from == aId && edge.to == bId) return edge.waypoints;
-      if (edge.from == bId && edge.to == aId) return edge.waypoints.reversed.toList();
+      if (edge.from == bId && edge.to == aId)
+        return edge.waypoints.reversed.toList();
     }
     return const [];
   }
@@ -153,17 +227,22 @@ class MapPainter extends CustomPainter {
         ),
       )
       ..layout();
-    textPainter.paint(canvas, Offset(point.dx - textPainter.width / 2, point.dy - textPainter.height));
+    textPainter.paint(
+        canvas,
+        Offset(
+            point.dx - textPainter.width / 2, point.dy - textPainter.height));
   }
 
   /// Draws a compact red location dot for the current position.
   /// Simple, clear, and easy to read in a retail navigation POC.
-  void _drawDirectionArrow(Canvas canvas, {required Offset from, required double angle}) {
+  void _drawDirectionArrow(Canvas canvas,
+      {required Offset from, required double angle}) {
     canvas.save();
     canvas.translate(from.dx, from.dy);
     canvas.rotate(angle);
 
-    canvas.drawCircle(const Offset(0, 0), 12, Paint()..color = Colors.white.withValues(alpha: 0.9));
+    canvas.drawCircle(const Offset(0, 0), 12,
+        Paint()..color = Colors.white.withValues(alpha: 0.9));
     canvas.drawCircle(const Offset(0, 0), 7, Paint()..color = Colors.red);
     canvas.drawCircle(const Offset(0, 0), 3, Paint()..color = Colors.white);
     canvas.restore();
@@ -177,6 +256,10 @@ class MapPainter extends CustomPainter {
         oldDelegate.livePosition != livePosition ||
         oldDelegate.headingDegrees != headingDegrees ||
         oldDelegate.mapNorthOffsetDegrees != mapNorthOffsetDegrees ||
+        oldDelegate.capturePosition != capturePosition ||
+        oldDelegate.capturePath != capturePath ||
+        oldDelegate.anchorPosition != anchorPosition ||
+        oldDelegate.anchorLabel != anchorLabel ||
         oldDelegate.mapSize != mapSize;
   }
 }

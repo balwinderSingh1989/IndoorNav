@@ -1,18 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../../models/beacon.dart';
-import '../../models/store_map.dart';
 import '../../services/beacon_placement_generator.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 import '../widgets/beacon_settings_editor.dart';
+import 'beacon_survey_screen.dart';
 
 class BeaconSettingsScreen extends StatefulWidget {
   const BeaconSettingsScreen({
     super.key,
     required this.storeMap,
+    required this.bleScanner,
   });
 
   final StoreMap storeMap;
+  final BleScannerService bleScanner;
 
   @override
   State<BeaconSettingsScreen> createState() => _BeaconSettingsScreenState();
@@ -61,6 +63,18 @@ class _BeaconSettingsScreenState extends State<BeaconSettingsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Beacon settings'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.fact_check_outlined),
+            tooltip: 'Survey beacon placement',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                  builder: (_) => BeaconSurveyScreen(
+                      storeMap: widget.storeMap,
+                      bleScanner: widget.bleScanner)),
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -70,7 +84,8 @@ class _BeaconSettingsScreenState extends State<BeaconSettingsScreen> {
             children: [
               Text(
                 'Suggested placement: 3–6 m spacing',
-                style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                style: textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 8),
               Text(
@@ -143,15 +158,18 @@ class _BeaconSettingsScreenState extends State<BeaconSettingsScreen> {
                       child: ListTile(
                         leading: CircleAvatar(
                           backgroundColor: Colors.orange,
-                          child: Text('${index + 1}', style: const TextStyle(color: Colors.white)),
+                          child: Text('${index + 1}',
+                              style: const TextStyle(color: Colors.white)),
                         ),
                         title: Text(beacon.name),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const SizedBox(height: 4),
-                            Text('Position: (${currentPosition.dx.toStringAsFixed(1)}, ${currentPosition.dy.toStringAsFixed(1)})'),
-                            Text('Target spacing: ${suggestion.distanceFromPreviousMeters.toStringAsFixed(1)} m'),
+                            Text(
+                                'Position: (${currentPosition.dx.toStringAsFixed(1)}, ${currentPosition.dy.toStringAsFixed(1)})'),
+                            Text(
+                                'Target spacing: ${suggestion.distanceFromPreviousMeters.toStringAsFixed(1)} m'),
                           ],
                         ),
                         trailing: FilledButton.tonal(

@@ -133,4 +133,15 @@ void main() {
       expect(isOppositeDirection(150, 0, thresholdDegrees: 160), isFalse);
     });
   });
+
+  group('segment-bounded motion helpers', () {
+    test('offsetAlongSegment never travels past the segment end', () {
+      const start = Offset(0, 0);
+      const end = Offset(10, 0);
+
+      expect(offsetAlongSegment(start, end, 100), const Offset(10, 0));
+      expect(offsetAlongSegment(start, end, 3), const Offset(3, 0));
+      expect(offsetAlongSegment(start, end, 0), const Offset(0, 0));
+    });
+  });
 }

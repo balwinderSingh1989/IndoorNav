@@ -37,6 +37,17 @@ Offset offsetFromBearing(double bearingDegrees, double mapNorthOffsetDegrees, do
   return Offset(distance * math.sin(theta), -distance * math.cos(theta));
 }
 
+/// Returns the point reached by traveling [distance] units from [start] toward
+/// [end], clamped to the segment end so corrected positions never overshoot the
+/// route segment while still preserving the measured step progress.
+Offset offsetAlongSegment(Offset start, Offset end, double distance) {
+  final segment = end - start;
+  final total = segment.distance;
+  if (total <= 0) return start;
+  final clamped = distance.clamp(0.0, total);
+  return start + Offset((segment.dx / total) * clamped, (segment.dy / total) * clamped);
+}
+
 /// How many degrees to rotate, via the shortest path, to go from bearing
 /// [from] to bearing [to] — positive means clockwise, negative
 /// counter-clockwise, always in `(-180, 180]`. Unlike

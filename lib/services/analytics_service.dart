@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../models/beacon.dart';
+import 'package:indoor_nav_engine/indoor_nav_engine.dart';
 
 /// One completed zone visit, as read back from [AnalyticsService.fileName].
 class ZoneVisit {
@@ -43,13 +43,16 @@ class AnalyticsService {
   /// Cumulative time spent per zone id this session (doesn't include
   /// whatever's already on disk from earlier sessions — that would need
   /// reading [fileName] back in, which nothing currently needs).
-  Map<String, Duration> get totalTimePerZone => Map.unmodifiable(_totalTimePerZone);
+  Map<String, Duration> get totalTimePerZone =>
+      Map.unmodifiable(_totalTimePerZone);
 
   /// The zone with the most accumulated time this session, or null if no
   /// zone has been fully visited-and-left yet.
   Beacon? mostVisitedZone(List<Beacon> beacons) {
     if (_totalTimePerZone.isEmpty) return null;
-    final topId = _totalTimePerZone.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    final topId = _totalTimePerZone.entries
+        .reduce((a, b) => a.value >= b.value ? a : b)
+        .key;
     for (final beacon in beacons) {
       if (beacon.id == topId) return beacon;
     }
@@ -79,7 +82,8 @@ class AnalyticsService {
     _enteredAt = null;
 
     final duration = DateTime.now().difference(enteredAt);
-    _totalTimePerZone.update(zone.id, (d) => d + duration, ifAbsent: () => duration);
+    _totalTimePerZone.update(zone.id, (d) => d + duration,
+        ifAbsent: () => duration);
     _appendVisit(zone, enteredAt, duration);
   }
 
@@ -94,8 +98,10 @@ class AnalyticsService {
 
   /// Tab-separated so the file stays trivial to load into a spreadsheet:
   /// entry time, zone id, zone name, dwell time in seconds.
-  Future<void> _appendVisit(Beacon zone, DateTime enteredAt, Duration duration) async {
-    final line = '${enteredAt.toIso8601String()}\t${zone.id}\t${zone.name}\t${duration.inSeconds}\n';
+  Future<void> _appendVisit(
+      Beacon zone, DateTime enteredAt, Duration duration) async {
+    final line =
+        '${enteredAt.toIso8601String()}\t${zone.id}\t${zone.name}\t${duration.inSeconds}\n';
     try {
       final file = await _ensureFile();
       await file.writeAsString(line, mode: FileMode.append, flush: true);
@@ -142,7 +148,8 @@ class AnalyticsService {
   /// recently-seen zone name for that id (in case a zone got renamed
   /// between visits) — the all-time equivalent of [totalTimePerZone],
   /// which only covers the current session.
-  static Map<String, ({String name, Duration total})> aggregateByZone(List<ZoneVisit> visits) {
+  static Map<String, ({String name, Duration total})> aggregateByZone(
+      List<ZoneVisit> visits) {
     final totals = <String, ({String name, Duration total})>{};
     for (final visit in visits) {
       final existing = totals[visit.zoneId];

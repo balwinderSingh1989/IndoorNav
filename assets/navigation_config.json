@@ -1,0 +1,57 @@
+{
+  "scanner": {
+    "rollingWindowMs": 1000,
+    "filterMode": "both",
+    "enableComparisonLogging": true,
+    "staleBeaconTimeoutMs": 5000,
+    "staleSweepIntervalMs": 2000,
+    "watchdogNoDeviceThresholdMs": 10000,
+    "watchdogCheckIntervalMs": 5000
+  },
+  "kalman": {
+    "measurementError": 1.0,
+    "processNoise": 0.04,
+    "initialError": 2.5
+  },
+  "median": {
+    "enabled": true
+  },
+  "thresholds": {
+    "standardSwitchMarginDb": 6.0,
+    "adjacentSwitchMarginDb": 8.0,
+    "freeRoamCompetitiveMarginDb": 2.0,
+    "secondaryOvertakeMarginDb": 1.5,
+    "candidatePeakToleranceDb": 1.5,
+    "reachabilityToleranceMeters": 2.0,
+    "rssiTrendThresholdDb": 4.0,
+    "initialFixMinMarginDb": 8.0,
+    "initialFixStrongRssiDb": -65.0,
+    "initialFixStrongVarianceThresholdDb": 1.0,
+    "initialFixSustainedMarginDb": 4.0,
+    "initialFixTimeoutTrendMinMarginDb": 2.0,
+    "candidateCompetitiveMarginDb": 2.0,
+    "lookAheadSecondaryLeadDb": 4.0
+  },
+  "confirmation": {
+    "requiredConsecutiveReadings": 5,
+    "candidatePersistenceMs": 800,
+    "switchCooldownMs": 600,
+    "candidateWeakeningReadingsRequired": 2,
+    "freeRoamSwitchConfirmReadings": 5,
+    "freeRoamPersistenceMs": 300
+  },
+  "smoothing": {
+    "rssiEmaAlpha": 0.3,
+    "rssiTrendWindowSize": 4,
+    "followTickIntervalMs": 50,
+    "visualBlendPerTick": 0.35,
+    "maxBeaconCorrectionResetMeters": 8.0
+  },
+  "initialFix": {
+    "windowSize": 10,
+    "minSamples": 8,
+    "maxWaitMs": 6000,
+    "strongMinSamples": 5,
+    "leaderStreakForAccept": 12
+  }
+}

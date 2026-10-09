@@ -8,6 +8,7 @@ class Beacon {
   final int? minor;
   final String name;
   final Offset position;
+  final List<String> observationIds;
 
   const Beacon({
     required this.id,
@@ -16,6 +17,7 @@ class Beacon {
     this.major,
     this.minor,
     required this.position,
+    this.observationIds = const [],
   });
 
   String get normalizedBleId => bleId.toLowerCase();
@@ -29,6 +31,9 @@ class Beacon {
 
   bool matchesBleId(String bleId) {
     final normalizedKey = bleId.toLowerCase();
+    if (observationIds.any((id) => id.toLowerCase() == normalizedKey)) {
+      return true;
+    }
     if (normalizedKey == normalizedBleId) return true;
     if (fullBleKey != null && normalizedKey == fullBleKey) return true;
     if (!normalizedBleId.contains(':') && normalizedKey.contains(':')) {
@@ -61,6 +66,9 @@ class Beacon {
         (json['x'] as num).toDouble(),
         (json['y'] as num).toDouble(),
       ),
+      observationIds: (json['observationIds'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
     );
   }
 }
