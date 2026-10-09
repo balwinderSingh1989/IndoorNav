@@ -31,7 +31,7 @@ class BeaconFingerprintController extends ChangeNotifier {
   List<BeaconReading> _captureReadings = [];
   Map<BeaconDistanceAlgorithm, FingerprintQuality> _liveQuality = const {};
 
-  int captureDuration = 5;
+  int captureDuration = 20;
 
   bool get isCapturing => _isCapturing;
   int get captureProgress => _captureProgress;
@@ -46,6 +46,13 @@ class BeaconFingerprintController extends ChangeNotifier {
       _fingerprintService.currentAlgorithm;
   Map<String, BeaconZoneFingerprint> get zones =>
       _fingerprintService.fingerprints;
+
+  int sampleCountForZone(String zoneId) =>
+      zones[zoneId]?.beaconSignatures.values.fold<int>(
+            0,
+            (count, signature) => count + signature.rssiReadings.length,
+          ) ??
+      0;
 
   Map<BeaconDistanceAlgorithm, DistanceResult?> get bestMatchesByAlgorithm {
     if (_currentReadings.isEmpty || zones.isEmpty) return const {};
@@ -153,7 +160,8 @@ class BeaconFingerprintController extends ChangeNotifier {
       );
       _refreshLiveQuality();
       _setStatus(
-        'Saved ${selectedBeacon.name}. A red dot means the live pattern matches this zone.',
+        'Saved ${_captureReadings.length} readings for ${selectedBeacon.name}. '
+        '${sampleCountForZone(selectedBeacon.id)} total readings are now stored for this zone.',
       );
     } finally {
       _isCapturing = false;

@@ -49,14 +49,18 @@ class BeaconFingerprintService {
       beaconRssiMap.putIfAbsent(beaconId, () => []).add(reading.rssi);
     }
 
-    final signatures = <String, BeaconSignature>{};
+    final existingSignatures = _fingerprints[zoneName]?.beaconSignatures;
+    final signatures = <String, BeaconSignature>{
+      if (existingSignatures != null) ...existingSignatures,
+    };
     beaconRssiMap.forEach((beaconId, rssiList) {
       final parts = beaconId.split(':');
+      final existingReadings = signatures[beaconId]?.rssiReadings ?? const [];
       signatures[beaconId] = BeaconSignature(
         uuid: parts.sublist(0, parts.length - 2).join(':'),
         major: int.parse(parts[parts.length - 2]),
         minor: int.parse(parts.last),
-        rssiReadings: rssiList,
+        rssiReadings: [...existingReadings, ...rssiList],
       );
     });
 

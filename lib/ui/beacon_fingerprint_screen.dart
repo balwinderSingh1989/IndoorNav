@@ -78,9 +78,9 @@ class _BeaconFingerprintScreenState extends State<BeaconFingerprintScreen> {
               style: Theme.of(context).textTheme.titleSmall),
           Slider(
             value: controller.captureDuration.toDouble(),
-            min: 3,
-            max: 20,
-            divisions: 17,
+            min: 5,
+            max: 60,
+            divisions: 11,
             label: '${controller.captureDuration}s',
             onChanged: controller.isCapturing
                 ? null
