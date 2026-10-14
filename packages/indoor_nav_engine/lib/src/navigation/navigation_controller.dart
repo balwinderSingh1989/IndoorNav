@@ -12,6 +12,7 @@ import '../motion/motion_service.dart';
 import '../logging/activity_logger.dart';
 import '../observations/beacon_observation_source.dart';
 import '../routing/pathfinding_service.dart';
+import '../positioning/route_constrained_position_service.dart';
 import '../positioning/zone_snap_service.dart';
 
 enum NavigationStatus {
@@ -90,6 +91,11 @@ class NavigationController extends ChangeNotifier {
         _pathfinder = pathfinder ?? PathfindingService(),
         navigationConfig = navigationConfig ?? const IndoorNavConfig(),
         _observationSource = observationSource {
+    _routePositioning = RouteConstrainedPositionService(
+      blend: this.navigationConfig.routePositionBlend,
+      maximumCorrectionMeters:
+          this.navigationConfig.routePositionMaximumCorrectionMeters,
+    );
     _rssiSub = _observationSource.rssiStream.listen(_onRssiUpdate);
 
     _stepSub = motionService.stepDistances.listen(_onStep);
@@ -215,6 +221,12 @@ class NavigationController extends ChangeNotifier {
   /// Minimum average RSSI delta required before trusting a trend.
   double get _rssiTrendThresholdDb => navigationConfig.rssiTrendThresholdDb;
 
+  bool get _routeConstrainedPositioningEnabled =>
+      navigationConfig.routeConstrainedPositioningEnabled;
+
+  int get _routePositionMinimumVisibleBeacons =>
+      navigationConfig.routePositionMinimumVisibleBeacons;
+
   // ---------------------------------------------------------------------------
   // INITIAL FIX
   // ---------------------------------------------------------------------------
@@ -262,6 +274,25 @@ class NavigationController extends ChangeNotifier {
   double get _initialFixTimeoutTrendMinMarginDb =>
       navigationConfig.initialFixTimeoutTrendMinMarginDb;
 
+  double get _initialFixTrendDeltaDb => navigationConfig.initialFixTrendDeltaDb;
+
+  int get _initialFixTrendLookbackReadings =>
+      navigationConfig.initialFixTrendLookbackReadings;
+
+  double get _initialFixMinMarginForStreakDb =>
+      navigationConfig.initialFixMinMarginForStreakDb;
+
+  int get _initialFixStreakDecayOnLoss =>
+      navigationConfig.initialFixStreakDecayOnLoss;
+
+  double get _initialFixTrendAcceptMarginDb =>
+      navigationConfig.initialFixTrendAcceptMarginDb;
+
+  double get _initialFixTimeoutFallbackMarginDb =>
+      navigationConfig.initialFixTimeoutFallbackMarginDb;
+
+  double get _initialFixStickinessDb => navigationConfig.initialFixStickinessDb;
+
   // ---------------------------------------------------------------------------
   // SERVICES
   // ---------------------------------------------------------------------------
@@ -275,6 +306,7 @@ class NavigationController extends ChangeNotifier {
 
   /// Kept for API compatibility with the existing controller.
   final ZoneSnapService _zoneSnap;
+  late final RouteConstrainedPositionService _routePositioning;
 
   final PathfindingService _pathfinder;
 
@@ -418,6 +450,12 @@ class NavigationController extends ChangeNotifier {
 
   /// Current rendered user position.
   Offset? liveUserPosition;
+
+  /// Last unconstrained EMA trilateration point, for Survey diagnostics.
+  Offset? rawTrilateratedPosition;
+
+  /// Last route-projected trilateration point, for Survey diagnostics.
+  Offset? routeConstrainedPosition;
 
   NavigationStatus status = NavigationStatus.idle;
 
@@ -584,6 +622,9 @@ class NavigationController extends ChangeNotifier {
     destinationBeacon = null;
 
     currentPath = [];
+    _routePositioning.reset();
+    rawTrilateratedPosition = null;
+    routeConstrainedPosition = null;
 
     currentDistanceMeters = null;
 
@@ -613,6 +654,8 @@ class NavigationController extends ChangeNotifier {
     // P1:
     // Smooth the raw RSSI before using it for decisions.
     _updateRssiEma(rssiByBleId);
+
+    // _updateRouteConstrainedPosition();
 
     _updateCurrentBeaconState(rssiByBleId);
 
@@ -2174,29 +2217,22 @@ class NavigationController extends ChangeNotifier {
       }
     }
 
-    if (history == null || history.length < 4) {
+    if (history == null || history.length <= _initialFixTrendLookbackReadings) {
       return _InitialFixTrend.unknown;
     }
 
     // Compare the latest RSSI against a few readings earlier.
-    const lookback = 2;
-
-    if (history.length <= lookback) {
-      return _InitialFixTrend.unknown;
-    }
-
     final latest = history.last;
-    final previous = history[history.length - 1 - lookback];
+    final previous =
+        history[history.length - 1 - _initialFixTrendLookbackReadings];
 
     final delta = latest - previous;
 
-    const trendThresholdDb = 0.8;
-
-    if (delta >= trendThresholdDb) {
+    if (delta >= _initialFixTrendDeltaDb) {
       return _InitialFixTrend.strengthening;
     }
 
-    if (delta <= -trendThresholdDb) {
+    if (delta <= -_initialFixTrendDeltaDb) {
       return _InitialFixTrend.weakening;
     }
 
@@ -2330,8 +2366,6 @@ class NavigationController extends ChangeNotifier {
     /// Only apply stickiness during the very first fix phase. Once a beacon
     /// is accepted and we start navigating, regular beacon-switch logic takes
     /// over and can transition if the user actually moves.
-    const currentBeaconStickinessDb = 3.5;
-
     final lockedId = _isInitialFixComplete ? null : currentBeacon?.id;
 
     // ------------------------------------------------------------
@@ -2342,9 +2376,9 @@ class NavigationController extends ChangeNotifier {
       ..sort(
         (a, b) {
           final aScore =
-              a.value + (a.key == lockedId ? currentBeaconStickinessDb : 0);
+              a.value + (a.key == lockedId ? _initialFixStickinessDb : 0);
           final bScore =
-              b.value + (b.key == lockedId ? currentBeaconStickinessDb : 0);
+              b.value + (b.key == lockedId ? _initialFixStickinessDb : 0);
 
           return bScore.compareTo(aScore);
         },
@@ -2426,20 +2460,16 @@ class NavigationController extends ChangeNotifier {
     // Update streak, but only if the margin is meaningful (>= 0.5dB).
     // RSSI noise is ~0.1-0.3dB RMS, so 0.5dB is real signal difference.
     // This blocks pure noise oscillations while allowing real beacon transitions.
-    const minMarginForStreak = 0.5;
-
     // Decay by 2 (vs +1 to build) so a stale lock gives up faster once the
     // real signal has already flipped, without lowering the bar to acquire one.
-    const streakDecayOnLoss = 2;
-
     for (final id in averages.keys) {
       final current = _initialFixLeaderStreaks[id] ?? 0;
 
-      if (id == bestId && margin >= minMarginForStreak) {
+      if (id == bestId && margin >= _initialFixMinMarginForStreakDb) {
         _initialFixLeaderStreaks[id] = current + 1;
       } else if (id != bestId && current > 0) {
         _initialFixLeaderStreaks[id] =
-            (current - streakDecayOnLoss).clamp(0, current);
+            (current - _initialFixStreakDecayOnLoss).clamp(0, current);
       }
     }
 
@@ -2533,7 +2563,7 @@ class NavigationController extends ChangeNotifier {
       // This prevents accepting Breakout at 1.3 dB when ChatGPT was 3+ dB stronger
       // seconds earlier, just because of RF convergence + brief trend flutter.
       // Equal TX power means real signal differences are 3.0+ dB, not noise-induced 1.3 dB.
-      if (margin >= 4.0) {
+      if (margin >= _initialFixTrendAcceptMarginDb) {
         // Trend detected, but verify the strengthening beacon's signal is stable
         // (not just trending up while still being erratic/multipath-prone)
         final bestSamples = _initialFixRssiWindows[bestId];
@@ -2690,7 +2720,7 @@ class NavigationController extends ChangeNotifier {
       return null;
     }
 
-    if (margin > 1.4 &&
+    if (margin > _initialFixTimeoutFallbackMarginDb &&
         (bestTrend == _InitialFixTrend.strengthening ||
             bestTrend == _InitialFixTrend.stable)) {
       _log(
@@ -4737,6 +4767,9 @@ class NavigationController extends ChangeNotifier {
         .join(' → ');
 
     currentPath = result.path;
+    _routePositioning.reset();
+    rawTrilateratedPosition = null;
+    routeConstrainedPosition = null;
 
     currentDistanceMeters = result.distanceMeters;
 
