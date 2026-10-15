@@ -14,34 +14,45 @@ class IndoorNavConfig {
     this.staleSweepInterval = const Duration(seconds: 2),
     this.watchdogNoDeviceThreshold = const Duration(seconds: 10),
     this.watchdogCheckInterval = const Duration(seconds: 5),
-    this.requiredConsecutiveReadings = 5,
-    this.candidatePersistence = const Duration(milliseconds: 800),
+    this.requiredConsecutiveReadings = 3,
+    this.candidatePersistence = const Duration(milliseconds: 500),
     this.switchCooldown = const Duration(milliseconds: 600),
     this.standardSwitchMarginDb = 6.0,
-    this.adjacentSwitchMarginDb = 8.0,
+    this.adjacentSwitchMarginDb = 6.0,
     this.freeRoamCompetitiveMarginDb = 2.0,
     this.secondaryOvertakeMarginDb = 1.5,
     this.candidatePeakToleranceDb = 1.5,
     this.candidateWeakeningReadingsRequired = 2,
     this.reachabilityToleranceMeters = 2.0,
-    this.freeRoamSwitchConfirmReadings = 5,
+    this.freeRoamSwitchConfirmReadings = 3,
     this.freeRoamPersistence = const Duration(milliseconds: 300),
     this.followTickInterval = const Duration(milliseconds: 50),
     this.visualBlendPerTick = 0.35,
     this.maxBeaconCorrectionResetMeters = 8.0,
-    this.rssiEmaAlpha = 0.30,
+    this.rssiEmaAlpha = 0.50,
     this.rssiTrendWindowSize = 4,
-    this.rssiTrendThresholdDb = 4.0,
+    this.rssiTrendThresholdDb = 1.2,
+    this.routeConstrainedPositioningEnabled = true,
+    this.routePositionMinimumVisibleBeacons = 2,
+    this.routePositionBlend = 0.20,
+    this.routePositionMaximumCorrectionMeters = 2.0,
     this.initialFixWindowSize = 10,
-    this.initialFixMinSamples = 8,
-    this.initialFixMinMarginDb = 8.0,
-    this.initialFixMaxWait = const Duration(seconds: 6),
+    this.initialFixMinSamples = 5,
+    this.initialFixMinMarginDb = 6.0,
+    this.initialFixMaxWait = const Duration(seconds: 3),
     this.initialFixStrongRssiDb = -65.0,
-    this.initialFixStrongMinSamples = 5,
+    this.initialFixStrongMinSamples = 3,
     this.initialFixStrongVarianceThresholdDb = 1.0,
-    this.initialFixSustainedMarginDb = 4.0,
-    this.initialFixLeaderStreakForAccept = 12,
+    this.initialFixSustainedMarginDb = 2.5,
+    this.initialFixLeaderStreakForAccept = 6,
     this.initialFixTimeoutTrendMinMarginDb = 2.0,
+    this.initialFixTrendDeltaDb = 0.8,
+    this.initialFixTrendLookbackReadings = 2,
+    this.initialFixMinMarginForStreakDb = 0.5,
+    this.initialFixStreakDecayOnLoss = 2,
+    this.initialFixTrendAcceptMarginDb = 4.0,
+    this.initialFixTimeoutFallbackMarginDb = 1.4,
+    this.initialFixStickinessDb = 3.5,
     this.candidateCompetitiveMarginDb = 2.0,
     this.lookAheadSecondaryLeadDb = 4.0,
   });
@@ -74,6 +85,10 @@ class IndoorNavConfig {
   final double rssiEmaAlpha;
   final int rssiTrendWindowSize;
   final double rssiTrendThresholdDb;
+  final bool routeConstrainedPositioningEnabled;
+  final int routePositionMinimumVisibleBeacons;
+  final double routePositionBlend;
+  final double routePositionMaximumCorrectionMeters;
   final int initialFixWindowSize;
   final int initialFixMinSamples;
   final double initialFixMinMarginDb;
@@ -84,6 +99,13 @@ class IndoorNavConfig {
   final double initialFixSustainedMarginDb;
   final int initialFixLeaderStreakForAccept;
   final double initialFixTimeoutTrendMinMarginDb;
+  final double initialFixTrendDeltaDb;
+  final int initialFixTrendLookbackReadings;
+  final double initialFixMinMarginForStreakDb;
+  final int initialFixStreakDecayOnLoss;
+  final double initialFixTrendAcceptMarginDb;
+  final double initialFixTimeoutFallbackMarginDb;
+  final double initialFixStickinessDb;
   final double candidateCompetitiveMarginDb;
   final double lookAheadSecondaryLeadDb;
 
@@ -93,6 +115,7 @@ class IndoorNavConfig {
     final thresholds = _section(json, 'thresholds');
     final confirmation = _section(json, 'confirmation');
     final smoothing = _section(json, 'smoothing');
+    final positioning = _section(json, 'positioning');
     final initialFix = _section(json, 'initialFix');
 
     return IndoorNavConfig(
@@ -122,7 +145,7 @@ class IndoorNavConfig {
       standardSwitchMarginDb: _number(thresholds, json,
           'standardSwitchMarginDb', 'standardSwitchMarginDb', 6.0),
       adjacentSwitchMarginDb: _number(thresholds, json,
-          'adjacentSwitchMarginDb', 'adjacentSwitchMarginDb', 8.0),
+          'adjacentSwitchMarginDb', 'adjacentSwitchMarginDb', 6.0),
       freeRoamCompetitiveMarginDb: _number(thresholds, json,
           'freeRoamCompetitiveMarginDb', 'freeRoamCompetitiveMarginDb', 2.0),
       secondaryOvertakeMarginDb: _number(thresholds, json,
@@ -148,22 +171,35 @@ class IndoorNavConfig {
           'maxBeaconCorrectionResetMeters',
           8.0),
       rssiEmaAlpha:
-          _number(smoothing, json, 'rssiEmaAlpha', 'rssiEmaAlpha', 0.30),
+          _number(smoothing, json, 'rssiEmaAlpha', 'rssiEmaAlpha', 0.50),
       rssiTrendWindowSize: _integer(smoothing, json, 'rssiTrendWindowSize', 4),
       rssiTrendThresholdDb: _number(thresholds, json, 'rssiTrendThresholdDb',
-          'rssiTrendThresholdDb', 4.0),
+          'rssiTrendThresholdDb', 1.2),
+      routeConstrainedPositioningEnabled:
+          _bool(positioning, json, 'enabled', true),
+      routePositionMinimumVisibleBeacons:
+          _integer(positioning, json, 'minimumVisibleBeacons', 2),
+      routePositionBlend:
+          _number(positioning, json, 'blend', 'routePositionBlend', 0.20),
+      routePositionMaximumCorrectionMeters: _number(
+        positioning,
+        json,
+        'maximumCorrectionMeters',
+        'routePositionMaximumCorrectionMeters',
+        2.0,
+      ),
       initialFixWindowSize: _integer(initialFix, json, 'windowSize', 10,
           legacyKey: 'initialFixWindowSize'),
-      initialFixMinSamples: _integer(initialFix, json, 'minSamples', 8,
+      initialFixMinSamples: _integer(initialFix, json, 'minSamples', 5,
           legacyKey: 'initialFixMinSamples'),
       initialFixMinMarginDb: _number(thresholds, json, 'initialFixMinMarginDb',
-          'initialFixMinMarginDb', 8.0),
-      initialFixMaxWait: _duration(initialFix, json, 'maxWaitMs', 6000,
+          'initialFixMinMarginDb', 6.0),
+      initialFixMaxWait: _duration(initialFix, json, 'maxWaitMs', 3000,
           legacyKey: 'initialFixMaxWaitMs'),
       initialFixStrongRssiDb: _number(thresholds, json,
           'initialFixStrongRssiDb', 'initialFixStrongRssiDb', -65.0),
       initialFixStrongMinSamples: _integer(
-          initialFix, json, 'strongMinSamples', 5,
+          initialFix, json, 'strongMinSamples', 3,
           legacyKey: 'initialFixStrongMinSamples'),
       initialFixStrongVarianceThresholdDb: _number(
           thresholds,
@@ -172,9 +208,9 @@ class IndoorNavConfig {
           'initialFixStrongVarianceThresholdDb',
           1.0),
       initialFixSustainedMarginDb: _number(thresholds, json,
-          'initialFixSustainedMarginDb', 'initialFixSustainedMarginDb', 4.0),
+          'initialFixSustainedMarginDb', 'initialFixSustainedMarginDb', 2.5),
       initialFixLeaderStreakForAccept: _integer(
-          initialFix, json, 'leaderStreakForAccept', 12,
+          initialFix, json, 'leaderStreakForAccept', 6,
           legacyKey: 'initialFixLeaderStreakForAccept'),
       initialFixTimeoutTrendMinMarginDb: _number(
           thresholds,
@@ -182,6 +218,55 @@ class IndoorNavConfig {
           'initialFixTimeoutTrendMinMarginDb',
           'initialFixTimeoutTrendMinMarginDb',
           2.0),
+      initialFixTrendDeltaDb: _number(
+        initialFix,
+        json,
+        'trendDeltaDb',
+        'initialFixTrendDeltaDb',
+        0.8,
+      ),
+      initialFixTrendLookbackReadings: _integer(
+        initialFix,
+        json,
+        'trendLookbackReadings',
+        2,
+        legacyKey: 'initialFixTrendLookbackReadings',
+      ),
+      initialFixMinMarginForStreakDb: _number(
+        initialFix,
+        json,
+        'minMarginForStreakDb',
+        'initialFixMinMarginForStreakDb',
+        0.5,
+      ),
+      initialFixStreakDecayOnLoss: _integer(
+        initialFix,
+        json,
+        'streakDecayOnLoss',
+        2,
+        legacyKey: 'initialFixStreakDecayOnLoss',
+      ),
+      initialFixTrendAcceptMarginDb: _number(
+        initialFix,
+        json,
+        'trendAcceptMarginDb',
+        'initialFixTrendAcceptMarginDb',
+        4.0,
+      ),
+      initialFixTimeoutFallbackMarginDb: _number(
+        initialFix,
+        json,
+        'timeoutFallbackMarginDb',
+        'initialFixTimeoutFallbackMarginDb',
+        1.4,
+      ),
+      initialFixStickinessDb: _number(
+        initialFix,
+        json,
+        'stickinessDb',
+        'initialFixStickinessDb',
+        3.5,
+      ),
       candidateCompetitiveMarginDb: _number(thresholds, json,
           'candidateCompetitiveMarginDb', 'candidateCompetitiveMarginDb', 2.0),
       lookAheadSecondaryLeadDb: _number(thresholds, json,
@@ -239,12 +324,25 @@ class IndoorNavConfig {
           'visualBlendPerTick': visualBlendPerTick,
           'maxBeaconCorrectionResetMeters': maxBeaconCorrectionResetMeters,
         },
+        'positioning': {
+          'enabled': routeConstrainedPositioningEnabled,
+          'minimumVisibleBeacons': routePositionMinimumVisibleBeacons,
+          'blend': routePositionBlend,
+          'maximumCorrectionMeters': routePositionMaximumCorrectionMeters,
+        },
         'initialFix': {
           'windowSize': initialFixWindowSize,
           'minSamples': initialFixMinSamples,
           'maxWaitMs': initialFixMaxWait.inMilliseconds,
           'strongMinSamples': initialFixStrongMinSamples,
           'leaderStreakForAccept': initialFixLeaderStreakForAccept,
+          'trendDeltaDb': initialFixTrendDeltaDb,
+          'trendLookbackReadings': initialFixTrendLookbackReadings,
+          'minMarginForStreakDb': initialFixMinMarginForStreakDb,
+          'streakDecayOnLoss': initialFixStreakDecayOnLoss,
+          'trendAcceptMarginDb': initialFixTrendAcceptMarginDb,
+          'timeoutFallbackMarginDb': initialFixTimeoutFallbackMarginDb,
+          'stickinessDb': initialFixStickinessDb,
         },
       };
 

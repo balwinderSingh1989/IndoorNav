@@ -19,7 +19,14 @@ void main() {
         'initialFixMinMarginDb': 7.0,
       },
       'smoothing': {'visualBlendPerTick': 0.5},
-      'initialFix': {'maxWaitMs': 7000},
+      'initialFix': {
+        'maxWaitMs': 7000,
+        'minSamples': 4,
+        'strongMinSamples': 2,
+        'trendDeltaDb': 0.7,
+        'trendLookbackReadings': 3,
+        'stickinessDb': 3.0,
+      },
     });
 
     expect(config.rollingWindow, const Duration(milliseconds: 1500));
@@ -30,6 +37,11 @@ void main() {
     expect(config.kalmanInitialError, 3.0);
     expect(config.adjacentSwitchMarginDb, 9.0);
     expect(config.initialFixMaxWait, const Duration(seconds: 7));
+    expect(config.initialFixMinSamples, 4);
+    expect(config.initialFixStrongMinSamples, 2);
+    expect(config.initialFixTrendDeltaDb, 0.7);
+    expect(config.initialFixTrendLookbackReadings, 3);
+    expect(config.initialFixStickinessDb, 3.0);
     expect(config.visualBlendPerTick, 0.5);
   });
 
@@ -52,6 +64,18 @@ void main() {
     expect((json['kalman'] as Map)['processNoise'], 0.04);
     expect((json['kalman'] as Map)['initialError'], 2.5);
     expect((json['scanner'] as Map)['watchdogNoDeviceThresholdMs'], 10000);
-    expect((json['initialFix'] as Map)['leaderStreakForAccept'], 12);
+    final initialFix = json['initialFix'] as Map;
+    expect(initialFix['leaderStreakForAccept'], 6);
+    expect(initialFix['minSamples'], 5);
+    expect(initialFix['maxWaitMs'], 3000);
+    final thresholds = json['thresholds'] as Map;
+    expect(thresholds['adjacentSwitchMarginDb'], 6.0);
+    expect(thresholds['rssiTrendThresholdDb'], 1.2);
+    final smoothing = json['smoothing'] as Map;
+    expect(smoothing['rssiEmaAlpha'], 0.5);
+    final confirmation = json['confirmation'] as Map;
+    expect(confirmation['freeRoamSwitchConfirmReadings'], 3);
+    expect(confirmation['freeRoamPersistenceMs'], 300);
+    expect(confirmation['switchCooldownMs'], 600);
   });
 }

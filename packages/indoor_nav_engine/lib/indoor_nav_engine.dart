@@ -16,4 +16,7 @@ export 'src/models/store_map.dart';
 export 'src/motion/motion_service.dart';
 export 'src/navigation/navigation_controller.dart';
 export 'src/positioning/zone_snap_service.dart';
+export 'src/positioning/route_constrained_position_service.dart';
+export 'src/positioning/route_position_fusion.dart';
+export 'src/positioning/route_progress_estimator.dart';
 export 'src/routing/pathfinding_service.dart';
