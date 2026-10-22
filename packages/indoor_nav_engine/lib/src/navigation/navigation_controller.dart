@@ -174,6 +174,25 @@ class NavigationController extends ChangeNotifier {
   double get _reachabilityToleranceMeters =>
       navigationConfig.reachabilityToleranceMeters;
 
+  double get _velocityBasedReachabilityAllowanceMeters {
+    final lastStepAt = _lastPdrStepAt;
+    if (lastStepAt == null ||
+        DateTime.now().difference(lastStepAt) >
+            navigationConfig.reachabilityVelocityMaxAge) {
+      return 0.0;
+    }
+
+    final lookaheadSeconds =
+        math.max(0, navigationConfig.reachabilityVelocityLookahead.inMicroseconds) /
+            Duration.microsecondsPerSecond;
+    final maximumExtraMeters =
+        math.max(0.0, navigationConfig.reachabilityVelocityMaxExtraMeters);
+    return math.min(
+      maximumExtraMeters,
+      _routeProgressEstimator.snapshot.velocityMps * lookaheadSeconds,
+    );
+  }
+
   /// Free-roam (no destination) candidate must win this many consecutive
   /// evaluations before replacing the current beacon — a single noisy
   /// ranking flip previously committed instantly with no hysteresis.
@@ -1529,8 +1548,7 @@ class NavigationController extends ChangeNotifier {
       bleTarget: _bleTargetPosition,
       bleBlend: 0.20,
       triangulatedTarget: constrained,
-      triangulationBlend:
-          navigationConfig.routePositionBlend * correctionTrust,
+      triangulationBlend: navigationConfig.routePositionBlend * correctionTrust,
       maximumCorrectionMapUnits: maximumCorrectionUnits,
     );
     _log(
@@ -2533,10 +2551,9 @@ class NavigationController extends ChangeNotifier {
     Set<String>? eligibleBeaconIds,
   ) {
     _initialFixStartedAt ??= DateTime.now();
-    final canUseFreeRoamTriangulation =
-        _freeRoamTriangulationFastFixEnabled &&
-            destinationBeacon == null &&
-            !_isInitialFixComplete;
+    final canUseFreeRoamTriangulation = _freeRoamTriangulationFastFixEnabled &&
+        destinationBeacon == null &&
+        !_isInitialFixComplete;
 
     if (!canUseFreeRoamTriangulation) {
       final reason = !_freeRoamTriangulationFastFixEnabled
@@ -2768,6 +2785,7 @@ class NavigationController extends ChangeNotifier {
     }
 
     if (averages.isEmpty) {
+      _initialFixLeaderStreaks.clear();
       return null;
     }
 
@@ -2808,28 +2826,7 @@ class NavigationController extends ChangeNotifier {
     final bestId = ranked.first.key;
     final bestAvg = ranked.first.value;
 
-    //TODO Balwinder
-    // final bestSamples = _initialFixRssiWindows[bestId];
-    //
-    // final bestName1 =
-    //     storeMap.beaconById(bestId)?.name ?? bestId;
-    //
-    // if (bestSamples != null && bestSamples.isNotEmpty) {
-    //   final bestVariability = _getSignalVariability(bestSamples);
-    //
-    //   if(bestVariability >   _initialFixStrongVarianceThresholdDb) {
-    //
-    //     _log(
-    //       'NAV## initial fix DEFER immediate (trend but erratic) — '
-    //           '$bestName1 strengthening '
-    //           'variance=${bestVariability.toStringAsFixed(2)}dB (threshold=${_initialFixStrongVarianceThresholdDb.toStringAsFixed(2)}dB)) ⚠️',
-    //     );
-    //
-    //   }
-    //     return null;
-    //   }
-    //
-    //
+
     final elapsed = DateTime.now().difference(
       _initialFixStartedAt!,
     );
@@ -2856,6 +2853,8 @@ class NavigationController extends ChangeNotifier {
     // ------------------------------------------------------------
 
     if (ranked.length == 1) {
+      _initialFixLeaderStreaks.clear();
+
       if (elapsed >= _initialFixMaxWait) {
         _log(
           'NAV## initial fix — single candidate '
@@ -2878,19 +2877,28 @@ class NavigationController extends ChangeNotifier {
 
     final margin = bestAvg - secondAvg;
 
-    // Update streak, but only if the margin is meaningful (>= 0.5dB).
-    // RSSI noise is ~0.1-0.3dB RMS, so 0.5dB is real signal difference.
-    // This blocks pure noise oscillations while allowing real beacon transitions.
-    // Decay by 2 (vs +1 to build) so a stale lock gives up faster once the
-    // real signal has already flipped, without lowering the bar to acquire one.
+    // Keep only bounded, recent evidence. Otherwise a beacon that led for a
+    // long time can retain an arbitrarily large score and keep winning the
+    // timeout fallback after another beacon becomes stronger.
+    final maxLeaderStreak = math.max(1, _initialFixLeaderStreakForAccept);
+    _initialFixLeaderStreaks.removeWhere(
+      (id, _) => !averages.containsKey(id),
+    );
+
     for (final id in averages.keys) {
-      final current = _initialFixLeaderStreaks[id] ?? 0;
+      final current =
+          (_initialFixLeaderStreaks[id] ?? 0).clamp(0, maxLeaderStreak).toInt();
 
       if (id == bestId && margin >= _initialFixMinMarginForStreakDb) {
-        _initialFixLeaderStreaks[id] = current + 1;
-      } else if (id != bestId && current > 0) {
-        _initialFixLeaderStreaks[id] =
-            (current - _initialFixStreakDecayOnLoss).clamp(0, current);
+        _initialFixLeaderStreaks[id] = math.min(current + 1, maxLeaderStreak);
+      } else if (current > 0) {
+        final decayed =
+            (current - _initialFixStreakDecayOnLoss).clamp(0, current).toInt();
+        if (decayed == 0) {
+          _initialFixLeaderStreaks.remove(id);
+        } else {
+          _initialFixLeaderStreaks[id] = decayed;
+        }
       }
     }
 
@@ -3169,113 +3177,6 @@ class NavigationController extends ChangeNotifier {
     return storeMap.beaconById(bestId);
   }
 
-  // Beacon? _selectInitialFixCandidate(
-  //   Map<String, double> rssiByBleId,
-  //   Set<String>? eligibleBeaconIds,
-  // ) {
-  //   _initialFixStartedAt ??= DateTime.now();
-  //
-  //   for (final entry in rssiByBleId.entries) {
-  //     final beacon = storeMap.beaconByBleId(
-  //       entry.key,
-  //     );
-  //
-  //     if (beacon == null) {
-  //       continue;
-  //     }
-  //
-  //     if (eligibleBeaconIds != null && !eligibleBeaconIds.contains(beacon.id)) {
-  //       continue;
-  //     }
-  //
-  //     final window = _initialFixRssiWindows.putIfAbsent(
-  //       beacon.id,
-  //       () => [],
-  //     );
-  //
-  //     // Use smoothed RSSI where available.
-  //     final value = _smoothedRssi(beacon.id) ?? entry.value;
-  //
-  //     window.add(value);
-  //
-  //     if (window.length > _initialFixWindowSize) {
-  //       window.removeAt(0);
-  //     }
-  //   }
-  //
-  //   final averages = <String, double>{};
-  //
-  //   _initialFixRssiWindows.forEach(
-  //     (
-  //       beaconId,
-  //       samples,
-  //     ) {
-  //       if (eligibleBeaconIds != null &&
-  //           !eligibleBeaconIds.contains(beaconId)) {
-  //         return;
-  //       }
-  //
-  //       if (samples.length < _initialFixMinSamples) {
-  //         return;
-  //       }
-  //
-  //       averages[beaconId] = _average(samples);
-  //     },
-  //   );
-  //
-  //   if (averages.isEmpty) {
-  //     return null;
-  //   }
-  //
-  //   final ranked = averages.entries.toList()
-  //     ..sort(
-  //       (a, b) => b.value.compareTo(
-  //         a.value,
-  //       ),
-  //     );
-  //
-  //   final bestId = ranked.first.key;
-  //
-  //   final bestAvg = ranked.first.value;
-  //
-  //   final elapsed = DateTime.now().difference(
-  //     _initialFixStartedAt!,
-  //   );
-  //
-  //   if (ranked.length > 1) {
-  //     final margin = bestAvg - ranked[1].value;
-  //
-  //     if (margin < _initialFixMinMarginDb) {
-  //       if (elapsed < _initialFixMaxWait) {
-  //         _log(
-  //           'NAV## initial fix ambiguous — '
-  //           'top candidates: '
-  //           '${ranked.take(3).map(
-  //                 (e) => '${storeMap.beaconById(e.key)?.name ?? e.key}:'
-  //                     '${e.value.toStringAsFixed(1)}dB',
-  //               ).join(", ")} '
-  //           '— waiting for clearer signal '
-  //           '(${elapsed.inMilliseconds}ms elapsed)',
-  //         );
-  //
-  //         return null;
-  //       }
-  //
-  //       _log(
-  //         'NAV## initial fix timeout after '
-  //         '${elapsed.inSeconds}s — '
-  //         'committing to best average '
-  //         '(${storeMap.beaconById(bestId)?.name}, '
-  //         'margin only '
-  //         '${margin.toStringAsFixed(1)}dB)',
-  //       );
-  //     }
-  //   }
-  //
-  //   return storeMap.beaconById(
-  //     bestId,
-  //   );
-  // }
 
   // ---------------------------------------------------------------------------
   // P0: NAVIGATION HOP VALIDATION
@@ -3872,7 +3773,10 @@ class NavigationController extends ChangeNotifier {
     // NORMAL PHYSICAL REACHABILITY
     // -----------------------------------------------------------------------
 
-    final plausibleMeters = _metersSinceBeacon + _reachabilityToleranceMeters;
+    final velocityExtraMeters = _velocityBasedReachabilityAllowanceMeters;
+    final effectiveToleranceMeters =
+        _reachabilityToleranceMeters + velocityExtraMeters;
+    final plausibleMeters = _metersSinceBeacon + effectiveToleranceMeters;
 
     final reachable = walkingDistanceMeters <= plausibleMeters;
 
@@ -3884,8 +3788,9 @@ class NavigationController extends ChangeNotifier {
         'away via graph from ${anchor.name}, '
         '${_metersSinceBeacon.toStringAsFixed(1)}m '
         'walked so far '
-        '(tolerance '
-        '${_reachabilityToleranceMeters}m) '
+        '(baseTolerance=${_reachabilityToleranceMeters}m '
+        'velocityExtra=${velocityExtraMeters.toStringAsFixed(2)}m '
+        'speed=${_routeProgressEstimator.snapshot.velocityMps.toStringAsFixed(2)}m/s) '
         '→ REACHABLE',
       );
 
@@ -3898,8 +3803,9 @@ class NavigationController extends ChangeNotifier {
         'away via graph from ${anchor.name}, '
         '${_metersSinceBeacon.toStringAsFixed(1)}m '
         'walked so far '
-        '(tolerance '
-        '${_reachabilityToleranceMeters}m) '
+        '(baseTolerance=${_reachabilityToleranceMeters}m '
+        'velocityExtra=${velocityExtraMeters.toStringAsFixed(2)}m '
+        'speed=${_routeProgressEstimator.snapshot.velocityMps.toStringAsFixed(2)}m/s) '
         '→ NOT REACHABLE',
       );
     }
@@ -4564,9 +4470,9 @@ class NavigationController extends ChangeNotifier {
 
     _initialFixStartedAt = null;
 
-    // Halve rather than wipe — a beacon already trending toward leadership
-    // shouldn't have to re-earn all its evidence from zero after a switch.
-    _initialFixLeaderStreaks.updateAll((_, v) => v ~/ 2);
+    // A new beacon anchor starts a fresh selection cycle; do not carry
+    // leadership evidence across the switch.
+    _initialFixLeaderStreaks.clear();
 
     _isInitialFixComplete = false;
 
@@ -4640,6 +4546,17 @@ class NavigationController extends ChangeNotifier {
       'trend=$_nextBeaconTrend',
     );
 
+    final now = DateTime.now();
+    final stepIntervalSeconds = _lastPdrStepAt == null
+        ? 0.0
+        : now.difference(_lastPdrStepAt!).inMicroseconds / 1000000.0;
+    _lastPdrStepAt = now;
+    final effectiveDelta = distanceMeters;
+    final velocityMps = stepIntervalSeconds > 0.0 && stepIntervalSeconds < 3.0
+        ? effectiveDelta / stepIntervalSeconds
+        : 0.0;
+    _routeProgressEstimator.updateVelocity(velocityMps);
+
     if (startBeacon == null) {
       _log('PDR_STEP no current beacon; movement recorded but not projected');
       return;
@@ -4694,16 +4611,6 @@ class NavigationController extends ChangeNotifier {
     // points away is evidence for correcting or rejecting a beacon switch,
     // not evidence that the user stopped walking. BLE progress correction
     // runs separately and can pull the visual target back when appropriate.
-    final effectiveDelta = distanceMeters;
-    final now = DateTime.now();
-    final stepIntervalSeconds = _lastPdrStepAt == null
-        ? 0.0
-        : now.difference(_lastPdrStepAt!).inMicroseconds / 1000000.0;
-    _lastPdrStepAt = now;
-    final velocityMps = stepIntervalSeconds > 0.0 && stepIntervalSeconds < 3.0
-        ? effectiveDelta / stepIntervalSeconds
-        : 0.0;
-
     _segmentProgressMeters = (_segmentProgressMeters + effectiveDelta).clamp(
       0.0,
       segment,
