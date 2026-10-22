@@ -228,6 +228,9 @@ class NavigationController extends ChangeNotifier {
   int get _routePositionMinimumVisibleBeacons =>
       navigationConfig.routePositionMinimumVisibleBeacons;
 
+  bool get _freeRoamTriangulationFastFixEnabled =>
+      navigationConfig.freeRoamTriangulationFastFixEnabled;
+
   // ---------------------------------------------------------------------------
   // INITIAL FIX
   // ---------------------------------------------------------------------------
@@ -476,8 +479,6 @@ class NavigationController extends ChangeNotifier {
   DateTime? _segmentBoundarySince;
 
   DateTime? _lastPdrStepAt;
-
-  static const double _minimumPdrStepIntervalSeconds = 0.20;
 
   // ---------------------------------------------------------------------------
   // PUBLIC GETTERS
@@ -1490,7 +1491,6 @@ class NavigationController extends ChangeNotifier {
     _routeProgressEstimator.updateTriangulation(
       confidence: correctionTrust,
     );
-    _logRouteProgressEstimate('triangulation');
 
     final constrained = _routePositioning.update(
       rawPosition: estimate.position,
@@ -2007,6 +2007,8 @@ class NavigationController extends ChangeNotifier {
   void _updateBleRouteProgress(
     Map<String, double> rssiByBleId,
   ) {
+    if (destinationBeacon == null) return;
+
     if (destinationBeacon == null || currentBeacon == null) {
       return;
     }
@@ -2040,9 +2042,8 @@ class NavigationController extends ChangeNotifier {
     _routeProgressEstimator.updateBle(
       progressMeters: bleFraction * segment,
       segmentLengthMeters: segment,
-      confidence: (deltaDb / 12.0).clamp(0.0, 1.0),
+      confidence: (deltaDb.abs() / 12.0).clamp(0.0, 1.0),
     );
-    _logRouteProgressEstimate('ble');
     final blendedFraction =
         (pdrFraction + ((bleFraction - pdrFraction) * bleBlend))
             .clamp(0.0, 1.0);
@@ -2532,6 +2533,22 @@ class NavigationController extends ChangeNotifier {
     Set<String>? eligibleBeaconIds,
   ) {
     _initialFixStartedAt ??= DateTime.now();
+    final canUseFreeRoamTriangulation =
+        _freeRoamTriangulationFastFixEnabled &&
+            destinationBeacon == null &&
+            !_isInitialFixComplete;
+
+    if (!canUseFreeRoamTriangulation) {
+      final reason = !_freeRoamTriangulationFastFixEnabled
+          ? 'disabled'
+          : destinationBeacon != null
+              ? 'destination_selected'
+              : 'initial_fix_complete';
+      _log(
+        'NAV## FREE_ROAM_INITIAL_TRIANGULATION NOT_ENTERED '
+        'update=$_rssiUpdateCount reason=$reason',
+      );
+    }
 
     // ------------------------------------------------------------
     // 1. Collect RSSI samples for visible / eligible beacons
@@ -2614,6 +2631,13 @@ class NavigationController extends ChangeNotifier {
 
     if (strongestStableBeacon != null) {
       final strongestAverage = strongestStableAverage!;
+      if (canUseFreeRoamTriangulation) {
+        _log(
+          'NAV## FREE_ROAM_INITIAL_TRIANGULATION NOT_ENTERED '
+          'update=$_rssiUpdateCount reason=strong_rssi_fast_accept '
+          'candidate=${strongestStableBeacon.name}',
+        );
+      }
       _log(
         'NAV## initial fix FAST ACCEPT (stable) — '
         '${strongestStableBeacon.name} '
@@ -2643,6 +2667,105 @@ class NavigationController extends ChangeNotifier {
         averages[beaconId] = _average(samples);
       },
     );
+
+    if (canUseFreeRoamTriangulation) {
+      final triangulationRssi = <String, double>{};
+      final triangulationRssiByBeaconId = <String, double>{};
+      final currentRssi = _rssiEma.isEmpty ? rssiByBleId : _rssiEma;
+      for (final entry in currentRssi.entries) {
+        final beacon = storeMap.beaconByBleId(entry.key);
+        if (beacon == null ||
+            (eligibleBeaconIds != null &&
+                !eligibleBeaconIds.contains(beacon.id))) {
+          continue;
+        }
+        triangulationRssi[entry.key] = entry.value;
+        triangulationRssiByBeaconId[beacon.id] = entry.value;
+      }
+
+      _log(
+        'NAV## FREE_ROAM_INITIAL_TRIANGULATION ENTER '
+        'update=$_rssiUpdateCount knownVisible=${triangulationRssi.length} '
+        'eligible=${eligibleBeaconIds?.length ?? "all"}',
+      );
+      final estimate =
+          _zoneSnap.estimatePositionDetailed(triangulationRssi, storeMap);
+      final residual = estimate?.residualRmsMeters;
+      final estimateIsUsable = estimate != null &&
+          estimate.method == PositionMethod.solved &&
+          estimate.contributors >= 3 &&
+          residual != null &&
+          residual <= 1.5;
+      final estimateReason = estimate == null
+          ? 'no_estimate'
+          : estimate.method != PositionMethod.solved
+              ? 'method_${estimate.method.name}'
+              : estimate.contributors < 3
+                  ? 'contributors_below_3'
+                  : residual == null
+                      ? 'residual_missing'
+                      : residual > 1.5
+                          ? 'residual_above_1_5m'
+                          : 'quality_pass';
+      _log(
+        'NAV## FREE_ROAM_INITIAL_TRIANGULATION RESULT '
+        'update=$_rssiUpdateCount outcome=${estimateIsUsable ? "QUALITY_PASS" : "REJECTED"} '
+        'reason=$estimateReason '
+        'method=${estimate?.method.name ?? "none"} '
+        'contributors=${estimate?.contributors ?? 0} '
+        'residual=${residual?.toStringAsFixed(2) ?? "none"}',
+      );
+      if (estimateIsUsable && estimate != null) {
+        Beacon? nearestBeacon;
+        var nearestDistanceMeters = double.infinity;
+        for (final beacon in storeMap.beacons) {
+          if (eligibleBeaconIds != null &&
+              !eligibleBeaconIds.contains(beacon.id)) {
+            continue;
+          }
+          final distanceMeters =
+              (estimate.position - beacon.position).distance *
+                  storeMap.metersPerUnit;
+          if (distanceMeters < nearestDistanceMeters) {
+            nearestBeacon = beacon;
+            nearestDistanceMeters = distanceMeters;
+          }
+        }
+
+        final nearestRssi = nearestBeacon == null
+            ? null
+            : triangulationRssiByBeaconId[nearestBeacon.id];
+        final strongestRssi = triangulationRssiByBeaconId.values.isEmpty
+            ? null
+            : triangulationRssiByBeaconId.values.reduce(math.max);
+        if (nearestBeacon != null &&
+            nearestRssi != null &&
+            strongestRssi != null &&
+            nearestDistanceMeters <= 4.0 &&
+            strongestRssi - nearestRssi <= 2.0) {
+          _log(
+            'NAV## FREE_ROAM_INITIAL_TRIANGULATION ACCEPT '
+            'update=$_rssiUpdateCount '
+            '${nearestBeacon.name} '
+            'distance=${nearestDistanceMeters.toStringAsFixed(1)}m '
+            'contributors=${estimate.contributors} '
+            'residual=${residual.toStringAsFixed(2)}m',
+          );
+          return nearestBeacon;
+        } else {
+          _log(
+            'NAV## FREE_ROAM_INITIAL_TRIANGULATION REJECT '
+            'update=$_rssiUpdateCount reason=nearest_beacon_gate '
+            'candidate=${nearestBeacon?.name ?? "none"} '
+            'nearestRssi=${nearestRssi?.toStringAsFixed(1) ?? "none"} '
+            'strongestRssi=${strongestRssi?.toStringAsFixed(1) ?? "none"} '
+            'distance=${nearestDistanceMeters.toStringAsFixed(1)}m '
+            'contributors=${estimate.contributors} '
+            'residual=${residual.toStringAsFixed(2)}m',
+          );
+        }
+      }
+    }
 
     if (averages.isEmpty) {
       return null;
@@ -4418,7 +4541,6 @@ class NavigationController extends ChangeNotifier {
     _targetPosition = snap;
     _routeProgressEstimator.reset();
     _lastPdrStepAt = null;
-    _logRouteProgressEstimate('beacon_reset');
 
     _segmentProgressMeters = 0.0;
 
@@ -4572,19 +4694,14 @@ class NavigationController extends ChangeNotifier {
     // points away is evidence for correcting or rejecting a beacon switch,
     // not evidence that the user stopped walking. BLE progress correction
     // runs separately and can pull the visual target back when appropriate.
+    final effectiveDelta = distanceMeters;
     final now = DateTime.now();
-    final hadPreviousStep = _lastPdrStepAt != null;
     final stepIntervalSeconds = _lastPdrStepAt == null
         ? 0.0
         : now.difference(_lastPdrStepAt!).inMicroseconds / 1000000.0;
     _lastPdrStepAt = now;
-    final stepTimingValid = !hadPreviousStep ||
-        stepIntervalSeconds >= _minimumPdrStepIntervalSeconds;
-    final effectiveDelta = stepTimingValid ? distanceMeters : 0.0;
-    final velocityMps = stepTimingValid &&
-        stepIntervalSeconds > 0.0 &&
-        stepIntervalSeconds < 3.0
-      ? effectiveDelta / stepIntervalSeconds
+    final velocityMps = stepIntervalSeconds > 0.0 && stepIntervalSeconds < 3.0
+        ? effectiveDelta / stepIntervalSeconds
         : 0.0;
 
     _segmentProgressMeters = (_segmentProgressMeters + effectiveDelta).clamp(
@@ -4595,9 +4712,8 @@ class NavigationController extends ChangeNotifier {
       deltaMeters: effectiveDelta,
       segmentLengthMeters: segment,
       velocityMps: velocityMps,
-      confidence: stepTimingValid ? 0.7 : 0.0,
+      confidence: 0.7,
     );
-    _logRouteProgressEstimate('pdr');
 
     final forwardRatio = segment <= 0.0
         ? 0.0
@@ -4664,7 +4780,6 @@ class NavigationController extends ChangeNotifier {
       '${segment.toStringAsFixed(2)}m '
       'ratio=${(forwardRatio * 100).toStringAsFixed(1)}% '
       'effectiveDelta=${effectiveDelta.toStringAsFixed(2)} '
-      'stepTimingValid=$stepTimingValid '
       'trend=$_nextBeaconTrend',
     );
 
@@ -5253,19 +5368,6 @@ class NavigationController extends ChangeNotifier {
 
     debugPrint(taggedMessage);
     logger?.log(taggedMessage);
-  }
-
-  void _logRouteProgressEstimate(String source) {
-    final estimate = _routeProgressEstimator.snapshot;
-    _logActive(
-      'ROUTE_ESTIMATE source=$source '
-      'progress=${estimate.progressMeters.toStringAsFixed(2)}m '
-      'velocity=${estimate.velocityMps.toStringAsFixed(2)}mps '
-      'pdrConfidence=${estimate.pdrConfidence.toStringAsFixed(2)} '
-      'bleConfidence=${estimate.bleConfidence.toStringAsFixed(2)} '
-      'triangulationConfidence=${estimate.triangulationConfidence.toStringAsFixed(2)} '
-      'uncertainty=${estimate.positionUncertaintyMeters.toStringAsFixed(2)}m',
-    );
   }
 
   // ---------------------------------------------------------------------------
