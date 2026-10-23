@@ -456,6 +456,7 @@ class NavigationController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   final Map<String, List<double>> _initialFixRssiWindows = {};
+  final Map<String, DateTime> _initialFixLastSeenAt = {};
 
   DateTime? _initialFixStartedAt;
 
@@ -2550,17 +2551,33 @@ class NavigationController extends ChangeNotifier {
     Map<String, double> rssiByBleId,
     Set<String>? eligibleBeaconIds,
   ) {
-    _initialFixStartedAt ??= DateTime.now();
-    final canUseFreeRoamTriangulation = _freeRoamTriangulationFastFixEnabled &&
-        destinationBeacon == null &&
-        !_isInitialFixComplete;
+    final now = DateTime.now();
+    _initialFixStartedAt ??= now;
+
+    final staleWindowIds = _initialFixRssiWindows.keys.where((beaconId) {
+      final lastSeenAt = _initialFixLastSeenAt[beaconId];
+      return lastSeenAt == null ||
+          now.difference(lastSeenAt) > navigationConfig.staleBeaconTimeout;
+    }).toList();
+    for (final beaconId in staleWindowIds) {
+      _initialFixRssiWindows.remove(beaconId);
+      _initialFixLastSeenAt.remove(beaconId);
+      _initialFixLeaderStreaks.remove(beaconId);
+    }
+    if (staleWindowIds.isNotEmpty) {
+      _log(
+        'NAV## initial fix expired stale RSSI windows '
+        'beacons=${staleWindowIds.map((id) => storeMap.beaconById(id)?.name ?? id).join(",")}',
+      );
+    }
+
+    final canUseFreeRoamTriangulation =
+        _freeRoamTriangulationFastFixEnabled && destinationBeacon == null;
 
     if (!canUseFreeRoamTriangulation) {
       final reason = !_freeRoamTriangulationFastFixEnabled
           ? 'disabled'
-          : destinationBeacon != null
-              ? 'destination_selected'
-              : 'initial_fix_complete';
+          : 'destination_selected';
       _log(
         'NAV## FREE_ROAM_INITIAL_TRIANGULATION NOT_ENTERED '
         'update=$_rssiUpdateCount reason=$reason',
@@ -2590,6 +2607,7 @@ class NavigationController extends ChangeNotifier {
       final value = _smoothedRssi(beacon.id) ?? entry.value;
 
       window.add(value);
+      _initialFixLastSeenAt[beacon.id] = now;
 
       if (window.length > _initialFixWindowSize) {
         window.removeAt(0);
@@ -4467,6 +4485,7 @@ class NavigationController extends ChangeNotifier {
 
     // First-fix state has completed.
     _initialFixRssiWindows.clear();
+    _initialFixLastSeenAt.clear();
 
     _initialFixStartedAt = null;
 

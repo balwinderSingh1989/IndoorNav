@@ -17,8 +17,15 @@ void main() {
       'thresholds': {
         'adjacentSwitchMarginDb': 9.0,
         'initialFixMinMarginDb': 7.0,
+        'reachabilityVelocityLookaheadMs': 750,
+        'reachabilityVelocityMaxAgeMs': 2500,
+        'reachabilityVelocityMaxExtraMeters': 1.5,
       },
       'smoothing': {'visualBlendPerTick': 0.5},
+      'positioning': {
+        'freeRoamTriangulationFastFixEnabled': true,
+        'freeRoamUserPositionEnabled': false,
+      },
       'initialFix': {
         'maxWaitMs': 7000,
         'minSamples': 4,
@@ -36,6 +43,13 @@ void main() {
     expect(config.kalmanProcessNoise, 0.06);
     expect(config.kalmanInitialError, 3.0);
     expect(config.adjacentSwitchMarginDb, 9.0);
+    expect(config.reachabilityVelocityLookahead,
+        const Duration(milliseconds: 750));
+    expect(
+      config.reachabilityVelocityMaxAge,
+      const Duration(milliseconds: 2500),
+    );
+    expect(config.reachabilityVelocityMaxExtraMeters, 1.5);
     expect(config.initialFixMaxWait, const Duration(seconds: 7));
     expect(config.initialFixMinSamples, 4);
     expect(config.initialFixStrongMinSamples, 2);
@@ -43,6 +57,8 @@ void main() {
     expect(config.initialFixTrendLookbackReadings, 3);
     expect(config.initialFixStickinessDb, 3.0);
     expect(config.visualBlendPerTick, 0.5);
+    expect(config.freeRoamTriangulationFastFixEnabled, isTrue);
+    expect(config.freeRoamUserPositionEnabled, isFalse);
   });
 
   test('accepts the legacy flat shape during migration', () {
@@ -60,6 +76,15 @@ void main() {
   test('serializes runtime tuning into functional sections', () {
     final json = const IndoorNavConfig().toJson();
 
+    expect(
+      (json['positioning'] as Map)['freeRoamTriangulationFastFixEnabled'],
+      isTrue,
+    );
+    expect(
+      (json['positioning'] as Map)['freeRoamUserPositionEnabled'],
+      isTrue,
+    );
+
     expect((json['kalman'] as Map)['measurementError'], 1.0);
     expect((json['kalman'] as Map)['processNoise'], 0.04);
     expect((json['kalman'] as Map)['initialError'], 2.5);
@@ -70,6 +95,9 @@ void main() {
     expect(initialFix['maxWaitMs'], 3000);
     final thresholds = json['thresholds'] as Map;
     expect(thresholds['adjacentSwitchMarginDb'], 6.0);
+    expect(thresholds['reachabilityVelocityLookaheadMs'], 500);
+    expect(thresholds['reachabilityVelocityMaxAgeMs'], 2000);
+    expect(thresholds['reachabilityVelocityMaxExtraMeters'], 2.0);
     expect(thresholds['rssiTrendThresholdDb'], 1.2);
     final smoothing = json['smoothing'] as Map;
     expect(smoothing['rssiEmaAlpha'], 0.5);

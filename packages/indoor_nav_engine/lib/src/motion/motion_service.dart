@@ -12,13 +12,10 @@ import 'package:sensors_plus/sensors_plus.dart';
 /// counter (accelerometer-backed) reports how far each step covers, and a
 /// gyroscope+compass fusion reports which way the phone is facing.
 ///
-/// [headingStream] is available but intentionally NOT consumed by
-/// [NavigationController] for navigation decisions — magnetometer-based
-/// compass headings are unreliable indoors (building steel/rebar and
-/// nearby electronics distort the field, same root cause that makes raw
-/// magnetic-field fingerprinting ambiguous). It's kept here only as a
-/// building block for any future cosmetic use (e.g. rotating a facing
-/// indicator), never as a trusted input to routing or reachability logic.
+/// [headingStream] supplies free-roam step direction. The controller
+/// constrains that direction to nearby walkable map edges; destination
+/// positioning remains route-based. Compass interference can still affect
+/// free-roam movement, so stale or non-finite headings are not used.
 ///
 /// PDR alone drifts over time — [NavigationController] periodically resets
 /// the accumulated position back to a known beacon location whenever BLE
@@ -85,8 +82,8 @@ class MotionService {
   /// current route).
   Stream<double> get stepDistances => _stepDistanceController.stream;
 
-  /// Live compass heading in degrees (0 = North), gyroscope-smoothed.
-  /// Not used for navigation decisions — see class doc.
+  /// Live fused compass heading in degrees (0 = North), gyroscope-smoothed.
+  /// Used only for map-constrained free-roam step direction.
   Stream<double> get headingStream => _headingController.stream;
 
   /// Human-readable reasons motion tracking couldn't start — e.g. a denied
@@ -189,8 +186,7 @@ class MotionService {
   /// often than the compass (typically 50-200 Hz vs. a magnetometer's
   /// noisier, coarser updates), so turns show up immediately instead of
   /// waiting on the next compass sample. Drifts on its own over time,
-  /// which [_onCompass] continuously corrects. Not used for navigation
-  /// decisions — see class doc.
+  /// which [_onCompass] continuously corrects.
   void _onGyro(GyroscopeEvent event) {
     final now = DateTime.now();
     final last = _lastGyroTime;
@@ -214,8 +210,7 @@ class MotionService {
   /// Anchors/corrects the gyro-integrated heading against the compass's
   /// absolute (but noisier, indoors-near-metal-unreliable) reading —
   /// a small correction weight per event so gyro drift gets continuously
-  /// reined in without reintroducing the compass's raw jumpiness. Purely
-  /// cosmetic input — not used for navigation decisions.
+  /// reined in without reintroducing the compass's raw jumpiness.
   void _onCompass(CompassEvent event) {
     final heading = event.heading;
     if (heading == null) return;

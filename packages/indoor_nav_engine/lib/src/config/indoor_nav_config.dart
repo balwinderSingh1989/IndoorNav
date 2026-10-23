@@ -24,6 +24,9 @@ class IndoorNavConfig {
     this.candidatePeakToleranceDb = 1.5,
     this.candidateWeakeningReadingsRequired = 2,
     this.reachabilityToleranceMeters = 2.0,
+    this.reachabilityVelocityLookahead = const Duration(milliseconds: 500),
+    this.reachabilityVelocityMaxAge = const Duration(seconds: 2),
+    this.reachabilityVelocityMaxExtraMeters = 2.0,
     this.freeRoamSwitchConfirmReadings = 3,
     this.freeRoamPersistence = const Duration(milliseconds: 300),
     this.followTickInterval = const Duration(milliseconds: 50),
@@ -36,6 +39,8 @@ class IndoorNavConfig {
     this.routePositionMinimumVisibleBeacons = 2,
     this.routePositionBlend = 0.20,
     this.routePositionMaximumCorrectionMeters = 2.0,
+    this.freeRoamUserPositionEnabled = true,
+    this.freeRoamTriangulationFastFixEnabled = true,
     this.initialFixWindowSize = 10,
     this.initialFixMinSamples = 5,
     this.initialFixMinMarginDb = 6.0,
@@ -77,6 +82,9 @@ class IndoorNavConfig {
   final double candidatePeakToleranceDb;
   final int candidateWeakeningReadingsRequired;
   final double reachabilityToleranceMeters;
+  final Duration reachabilityVelocityLookahead;
+  final Duration reachabilityVelocityMaxAge;
+  final double reachabilityVelocityMaxExtraMeters;
   final int freeRoamSwitchConfirmReadings;
   final Duration freeRoamPersistence;
   final Duration followTickInterval;
@@ -89,6 +97,8 @@ class IndoorNavConfig {
   final int routePositionMinimumVisibleBeacons;
   final double routePositionBlend;
   final double routePositionMaximumCorrectionMeters;
+  final bool freeRoamUserPositionEnabled;
+  final bool freeRoamTriangulationFastFixEnabled;
   final int initialFixWindowSize;
   final int initialFixMinSamples;
   final double initialFixMinMarginDb;
@@ -156,6 +166,25 @@ class IndoorNavConfig {
           _integer(confirmation, json, 'candidateWeakeningReadingsRequired', 2),
       reachabilityToleranceMeters: _number(thresholds, json,
           'reachabilityToleranceMeters', 'reachabilityToleranceMeters', 2.0),
+      reachabilityVelocityLookahead: _duration(
+        thresholds,
+        json,
+        'reachabilityVelocityLookaheadMs',
+        500,
+      ),
+      reachabilityVelocityMaxAge: _duration(
+        thresholds,
+        json,
+        'reachabilityVelocityMaxAgeMs',
+        2000,
+      ),
+      reachabilityVelocityMaxExtraMeters: _number(
+        thresholds,
+        json,
+        'reachabilityVelocityMaxExtraMeters',
+        'reachabilityVelocityMaxExtraMeters',
+        2.0,
+      ),
       freeRoamSwitchConfirmReadings:
           _integer(confirmation, json, 'freeRoamSwitchConfirmReadings', 5),
       freeRoamPersistence:
@@ -187,6 +216,14 @@ class IndoorNavConfig {
         'maximumCorrectionMeters',
         'routePositionMaximumCorrectionMeters',
         2.0,
+      ),
+      freeRoamUserPositionEnabled:
+          _bool(positioning, json, 'freeRoamUserPositionEnabled', true),
+      freeRoamTriangulationFastFixEnabled: _bool(
+        positioning,
+        json,
+        'freeRoamTriangulationFastFixEnabled',
+        true,
       ),
       initialFixWindowSize: _integer(initialFix, json, 'windowSize', 10,
           legacyKey: 'initialFixWindowSize'),
@@ -297,6 +334,12 @@ class IndoorNavConfig {
           'secondaryOvertakeMarginDb': secondaryOvertakeMarginDb,
           'candidatePeakToleranceDb': candidatePeakToleranceDb,
           'reachabilityToleranceMeters': reachabilityToleranceMeters,
+          'reachabilityVelocityLookaheadMs':
+              reachabilityVelocityLookahead.inMilliseconds,
+          'reachabilityVelocityMaxAgeMs':
+              reachabilityVelocityMaxAge.inMilliseconds,
+          'reachabilityVelocityMaxExtraMeters':
+              reachabilityVelocityMaxExtraMeters,
           'rssiTrendThresholdDb': rssiTrendThresholdDb,
           'initialFixMinMarginDb': initialFixMinMarginDb,
           'initialFixStrongRssiDb': initialFixStrongRssiDb,
@@ -329,6 +372,9 @@ class IndoorNavConfig {
           'minimumVisibleBeacons': routePositionMinimumVisibleBeacons,
           'blend': routePositionBlend,
           'maximumCorrectionMeters': routePositionMaximumCorrectionMeters,
+          'freeRoamUserPositionEnabled': freeRoamUserPositionEnabled,
+          'freeRoamTriangulationFastFixEnabled':
+              freeRoamTriangulationFastFixEnabled,
         },
         'initialFix': {
           'windowSize': initialFixWindowSize,

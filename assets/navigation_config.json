@@ -18,40 +18,58 @@
   },
   "thresholds": {
     "standardSwitchMarginDb": 6.0,
-    "adjacentSwitchMarginDb": 8.0,
+    "adjacentSwitchMarginDb": 6.0,
     "freeRoamCompetitiveMarginDb": 2.0,
     "secondaryOvertakeMarginDb": 1.5,
     "candidatePeakToleranceDb": 1.5,
-    "reachabilityToleranceMeters": 2.0,
-    "rssiTrendThresholdDb": 4.0,
-    "initialFixMinMarginDb": 8.0,
+    "reachabilityToleranceMeters": 5.0,
+    "reachabilityVelocityLookaheadMs": 500,
+    "reachabilityVelocityMaxAgeMs": 2000,
+    "reachabilityVelocityMaxExtraMeters": 2.0,
+    "rssiTrendThresholdDb": 1.2,
+    "initialFixMinMarginDb": 6.0,
     "initialFixStrongRssiDb": -65.0,
     "initialFixStrongVarianceThresholdDb": 1.0,
-    "initialFixSustainedMarginDb": 4.0,
+    "initialFixSustainedMarginDb": 2.5,
     "initialFixTimeoutTrendMinMarginDb": 2.0,
     "candidateCompetitiveMarginDb": 2.0,
     "lookAheadSecondaryLeadDb": 4.0
   },
   "confirmation": {
-    "requiredConsecutiveReadings": 5,
-    "candidatePersistenceMs": 800,
+    "requiredConsecutiveReadings": 3,
+    "candidatePersistenceMs": 500,
     "switchCooldownMs": 600,
     "candidateWeakeningReadingsRequired": 2,
-    "freeRoamSwitchConfirmReadings": 5,
+    "freeRoamSwitchConfirmReadings": 3,
     "freeRoamPersistenceMs": 300
   },
   "smoothing": {
-    "rssiEmaAlpha": 0.3,
+    "rssiEmaAlpha": 0.4,
     "rssiTrendWindowSize": 4,
     "followTickIntervalMs": 50,
     "visualBlendPerTick": 0.35,
     "maxBeaconCorrectionResetMeters": 8.0
   },
+  "positioning": {
+    "enabled": true,
+    "minimumVisibleBeacons": 2,
+    "blend": 0.2,
+    "maximumCorrectionMeters": 2.0,
+    "freeRoamUserPositionEnabled": true,
+    "freeRoamTriangulationFastFixEnabled": true
+  },
   "initialFix": {
     "windowSize": 10,
-    "minSamples": 8,
-    "maxWaitMs": 6000,
-    "strongMinSamples": 5,
-    "leaderStreakForAccept": 12
+    "minSamples": 5,
+    "maxWaitMs": 3000,
+    "strongMinSamples": 3,
+    "leaderStreakForAccept": 6,
+    "trendDeltaDb": 0.8,
+    "trendLookbackReadings": 2,
+    "minMarginForStreakDb": 0.5,
+    "streakDecayOnLoss": 2,
+    "trendAcceptMarginDb": 4.0,
+    "timeoutFallbackMarginDb": 1.4,
+    "stickinessDb": 3.5
   }
 }
