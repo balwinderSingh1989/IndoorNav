@@ -79,6 +79,8 @@ class _BeaconCandidateState {
 /// replace the current beacon. Physical reachability, RSSI strength,
 /// persistence and trend are then used as additional confidence gates.
 class NavigationController extends ChangeNotifier {
+  static const double _bleRouteProgressBlend = 0.20;
+
   NavigationController({
     required this.storeMap,
     required this.motionService,
@@ -182,9 +184,9 @@ class NavigationController extends ChangeNotifier {
       return 0.0;
     }
 
-    final lookaheadSeconds =
-        math.max(0, navigationConfig.reachabilityVelocityLookahead.inMicroseconds) /
-            Duration.microsecondsPerSecond;
+    final lookaheadSeconds = math.max(
+            0, navigationConfig.reachabilityVelocityLookahead.inMicroseconds) /
+        Duration.microsecondsPerSecond;
     final maximumExtraMeters =
         math.max(0.0, navigationConfig.reachabilityVelocityMaxExtraMeters);
     return math.min(
@@ -469,6 +471,21 @@ class NavigationController extends ChangeNotifier {
   /// Reset to false when a real beacon switch happens, so movement can re-engage initial-fix logic.
   bool _isInitialFixComplete = false;
 
+  /// Latest accepted free-roam triangulation, projected onto a corridor
+  /// touching [_FreeRoamTriangulatedFix.beaconId]. Used as the displayed
+  /// x,y instead of the beacon pin; null falls back to the beacon position.
+  _FreeRoamTriangulatedFix? _freeRoamTriangulatedFix;
+
+  /// Max distance (m) between the raw triangulated point and its corridor
+  /// projection before the projection is considered unreliable.
+  static const double _freeRoamFixMaxProjectionMeters = 3.0;
+
+  /// Accepted fixes older than this are not applied to the display.
+  static const Duration _freeRoamFixMaxAge = Duration(seconds: 3);
+
+  @visibleForTesting
+  Offset? get debugTargetPosition => _targetPosition;
+
   // ---------------------------------------------------------------------------
   // NAVIGATION POSITION
   // ---------------------------------------------------------------------------
@@ -484,6 +501,9 @@ class NavigationController extends ChangeNotifier {
 
   /// Latest bounded BLE correction for the current RSSI update.
   Offset? _bleTargetPosition;
+
+  /// Latest route-constrained triangulation target for the current RSSI update.
+  Offset? _triangulatedRouteTarget;
 
   /// Current rendered user position.
   Offset? liveUserPosition;
@@ -715,6 +735,11 @@ class NavigationController extends ChangeNotifier {
     // Smooth the raw RSSI before using it for decisions.
     _updateRssiEma(rssiByBleId);
 
+    // Each RSSI update produces a fresh set of radio corrections. Do not
+    // carry a missing BLE or triangulation measurement into the next fusion.
+    _bleTargetPosition = null;
+    _triangulatedRouteTarget = null;
+
     _updateRouteConstrainedPosition();
 
     _updateCurrentBeaconState(rssiByBleId);
@@ -727,6 +752,8 @@ class NavigationController extends ChangeNotifier {
     // In destination navigation, BLE may gently correct the visual progress
     // between confirmed beacon transitions without changing the route anchor.
     _updateBleRouteProgress(rssiByBleId);
+
+    _fuseRoutePositionTargets();
 
     // -----------------------------------------------------------------------
     // CANDIDATE SELECTION
@@ -799,6 +826,15 @@ class NavigationController extends ChangeNotifier {
       if (!changed) {
         // Already-selected beacon is still winning — nothing pending to clear.
         _clearPendingBeaconCandidate();
+
+        // A fresh triangulated fix near the current beacon refines the
+        // displayed x,y; the visual follow smooths the move.
+        final refinedPosition = _takeFreeRoamFixFor(candidate, now);
+        if (refinedPosition != null) {
+          _pdrTargetPosition = refinedPosition;
+          _targetPosition = refinedPosition;
+          notifyListeners();
+        }
 
         // -----------------------------------------------------------------------
         // FREE-ROAM IDLE HEARTBEAT (current beacon still winning)
@@ -963,7 +999,14 @@ class NavigationController extends ChangeNotifier {
 
       _nextBeaconTrend = _RssiTrend.unknown;
 
-      _snapToCurrentBeacon();
+      final freeRoamPosition = _takeFreeRoamFixFor(candidate, now);
+      final initialPosition = previousBeacon == null
+          ? (freeRoamPosition ?? liveUserPosition)
+          : null;
+      _snapToCurrentBeacon(
+        freeRoamPosition: freeRoamPosition,
+        initialPosition: initialPosition,
+      );
 
       _clearPendingBeaconCandidate();
 
@@ -1384,7 +1427,9 @@ class NavigationController extends ChangeNotifier {
 
       _recomputePath();
 
-      _snapToCurrentBeacon();
+      _snapToCurrentBeacon(
+        initialPosition: previousBeacon == null ? liveUserPosition : null,
+      );
 
       status = candidate.id == destinationBeacon?.id
           ? NavigationStatus.arrived
@@ -1527,45 +1572,18 @@ class NavigationController extends ChangeNotifier {
     rawTrilateratedPosition = estimate.position;
     routeConstrainedPosition = constrained;
 
-    final pdrTarget = _pdrTargetPosition ?? _targetPosition;
-    if (pdrTarget == null) {
-      _targetPosition = constrained;
-      liveUserPosition ??= constrained;
-      _log(
-        'TRIANGULATION applied as initial target '
-        'constrained=$constrained',
-      );
-      notifyListeners();
-      return;
-    }
-
-    final maximumCorrectionUnits =
-        navigationConfig.routePositionMaximumCorrectionMeters /
-            storeMap.metersPerUnit;
-    // Triangulation is a bounded correction to the PDR baseline, never a
-    // replacement for route progress or a beacon transition.
-    _targetPosition = _routePositionFusion.fuse(
-      pdrTarget: pdrTarget,
-      bleTarget: _bleTargetPosition,
-      bleBlend: 0.20,
-      triangulatedTarget: constrained,
-      triangulationBlend: navigationConfig.routePositionBlend * correctionTrust,
-      maximumCorrectionMapUnits: maximumCorrectionUnits,
-    );
+    _triangulatedRouteTarget = constrained;
     _log(
-      'TRIANGULATION correction applied '
-      'pdrTarget=$pdrTarget '
       'constrained=$constrained '
-      'target=$_targetPosition '
-      'maxCorrectionMeters=${navigationConfig.routePositionMaximumCorrectionMeters.toStringAsFixed(2)}',
+      'queued for explicit fusion '
+      'trust=${correctionTrust.toStringAsFixed(2)}',
     );
     _logActive(
-      'TRIANGULATION_APPLIED '
-      'target=$_targetPosition '
+      'TRIANGULATION_QUEUED '
+      'constrained=$constrained '
       'blend=${navigationConfig.routePositionBlend.toStringAsFixed(2)} '
-      'maxCorrectionMeters=${navigationConfig.routePositionMaximumCorrectionMeters.toStringAsFixed(2)}',
+      'correctionTrust=${correctionTrust.toStringAsFixed(2)}',
     );
-    notifyListeners();
   }
 //   void _onRssiUpdate(
 //     Map<String, double> rssiByBleId,
@@ -2057,43 +2075,100 @@ class NavigationController extends ChangeNotifier {
     final deltaDb = nextRssi - currentRssi;
     final bleFraction = 1.0 / (1.0 + math.exp(-deltaDb / 8.0));
     final pdrFraction = (_segmentProgressMeters / segment).clamp(0.0, 1.0);
-    const bleBlend = 0.20;
+    const bleBlend = _bleRouteProgressBlend;
     _routeProgressEstimator.updateBle(
       progressMeters: bleFraction * segment,
       segmentLengthMeters: segment,
       confidence: (deltaDb.abs() / 12.0).clamp(0.0, 1.0),
     );
-    final blendedFraction =
-        (pdrFraction + ((bleFraction - pdrFraction) * bleBlend))
-            .clamp(0.0, 1.0);
-
+    // Keep this as the raw BLE-derived target. The single fusion stage below
+    // owns the configured BLE blend, so BLE is not blended twice.
     _bleTargetPosition = _pointAlongCurrentEdge(
       currentBeacon!,
       next.position,
-      blendedFraction,
-    );
-
-    final pdrTarget = _pdrTargetPosition ??
-        _pointAlongCurrentEdge(
-          currentBeacon!,
-          next.position,
-          pdrFraction,
-        );
-    _targetPosition = _routePositionFusion.fuse(
-      pdrTarget: pdrTarget,
-      bleTarget: _bleTargetPosition,
-      bleBlend: bleBlend,
+      bleFraction,
     );
 
     _logActive(
-      'BLE_PROGRESS ${currentBeacon!.name} -> ${next.name} '
+      'BLE_PROGRESS_QUEUED ${currentBeacon!.name} -> ${next.name} '
       'currentRssi=${currentRssi.toStringAsFixed(1)} '
       'nextRssi=${nextRssi.toStringAsFixed(1)} '
       'bleRatio=${(bleFraction * 100).toStringAsFixed(1)}% '
       'pdrRatio=${(pdrFraction * 100).toStringAsFixed(1)}% '
-      'blendedRatio=${(blendedFraction * 100).toStringAsFixed(1)}% '
+      'target=raw_ble '
       'blend=${(bleBlend * 100).toStringAsFixed(0)}%',
     );
+  }
+
+  void _fuseRoutePositionTargets() {
+    final triangulationTarget = _triangulatedRouteTarget;
+    final bleTarget = _bleTargetPosition;
+
+    if (triangulationTarget == null && bleTarget == null) {
+      return;
+    }
+
+    final current = currentBeacon;
+    final next = current == null ? null : _pathBeaconAfter(current.id);
+    final segmentLength = current == null || next == null
+        ? 0.0
+        : _segmentLengthMeters(current, next.position);
+    final pdrFraction = segmentLength <= 0.0
+        ? 0.0
+        : (_segmentProgressMeters / segmentLength).clamp(0.0, 1.0);
+    final pdrTarget = _pdrTargetPosition ??
+        (current == null || next == null
+            ? _targetPosition
+            : _pointAlongCurrentEdge(current, next.position, pdrFraction));
+
+    if (pdrTarget == null) {
+      _log(
+        'ROUTE_FUSION skipped reason=no_pdr_baseline '
+        'ble=${bleTarget != null} triangulation=${triangulationTarget != null}',
+      );
+      return;
+    }
+
+    final maximumCorrectionUnits =
+        navigationConfig.routePositionMaximumCorrectionMeters /
+            storeMap.metersPerUnit;
+    final fused = _routePositionFusion.fuse(
+      pdrTarget: pdrTarget,
+      bleTarget: bleTarget,
+      bleBlend: _bleRouteProgressBlend,
+      triangulatedTarget: triangulationTarget,
+      triangulationBlend: triangulationTarget == null
+          ? 0.0
+          : navigationConfig.routePositionBlend,
+      maximumCorrectionMapUnits: maximumCorrectionUnits,
+    );
+    _targetPosition = fused;
+
+    final bleDistance =
+        bleTarget == null ? null : (bleTarget - pdrTarget).distance;
+    final triangulationDistance = triangulationTarget == null
+        ? null
+        : (triangulationTarget - pdrTarget).distance;
+    _log(
+      'ROUTE_FUSION applied '
+      'baseline=$pdrTarget '
+      'ble=${bleTarget ?? "none"} '
+      'triangulation=${triangulationTarget ?? "none"} '
+      'bleOffset=${bleDistance?.toStringAsFixed(2) ?? "none"}units '
+      'triangulationOffset=${triangulationDistance?.toStringAsFixed(2) ?? "none"}units '
+      'bleBlend=${bleTarget == null ? "0.00" : _bleRouteProgressBlend.toStringAsFixed(2)} '
+      'triangulationBlend=${triangulationTarget == null ? "0.00" : navigationConfig.routePositionBlend.toStringAsFixed(2)} '
+      'maxCorrectionMeters=${navigationConfig.routePositionMaximumCorrectionMeters.toStringAsFixed(2)} '
+      'target=$fused',
+    );
+    _logActive(
+      'ROUTE_FUSION '
+      'baseline=$pdrTarget '
+      'ble=${bleTarget == null ? "none" : "queued"} '
+      'triangulation=${triangulationTarget == null ? "none" : "queued"} '
+      'target=$fused',
+    );
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -2329,154 +2404,6 @@ class NavigationController extends ChangeNotifier {
 
     return null;
   }
-  // Beacon? _selectBeaconCandidate(
-  //     Map<String, double> rssiByBleId,
-  //     ) {
-  //   final exploring = destinationBeacon == null;
-  //
-  //
-  //   // -------------------------------------------------------------------------
-  //   // COLD START
-  //   // -------------------------------------------------------------------------
-  //
-  //   if (exploring || currentBeacon == null) {
-  //     // _log(
-  //     //   'NAV## CANDIDATE INITIAL FIX '
-  //     //       'reason=${exploring ? "destination is null" : "currentBeacon is null"}',
-  //     // );
-  //
-  //     return _selectInitialFixCandidate(
-  //       rssiByBleId,
-  //       null,
-  //     );
-  //   }
-  //
-  //   final current = currentBeacon!;
-  //
-  //   // _log(
-  //   //   'NAV## CANDIDATE CURRENT '
-  //   //       'name=${current.name} '
-  //   //       'id=${current.id}',
-  //   // );
-  //
-  //   // -------------------------------------------------------------------------
-  //   // PATH DEBUG
-  //   // -------------------------------------------------------------------------
-  //
-  //   // _log(
-  //   //   'NAV## CANDIDATE PATH '
-  //   //       '${currentPath.map(
-  //   //         (b) => '${b.name}[${b.id}]',
-  //   //   ).join(" → ")}',
-  //   // );
-  //
-  //   final currentIndex = currentPath.indexWhere(
-  //         (b) => b.id == current.id,
-  //   );
-  //
-  //   // _log(
-  //   //   'NAV## CANDIDATE CURRENT INDEX '
-  //   //       'current=${current.name} '
-  //   //       'index=$currentIndex '
-  //   //       'pathLength=${currentPath.length}',
-  //   // );
-  //
-  //   // -------------------------------------------------------------------------
-  //   // FIND NEXT BEACON
-  //   // -------------------------------------------------------------------------
-  //
-  //   final next = _pathBeaconAfter(
-  //     current.id,
-  //   );
-  //
-  //   // _log(
-  //   //   'NAV## CANDIDATE NEXT RESULT '
-  //   //       'current=${current.name} '
-  //   //       'currentId=${current.id} '
-  //   //       'next=${next?.name ?? "NULL"} '
-  //   //       'nextId=${next?.id ?? "NULL"}',
-  //   // );
-  //
-  //   if (next == null) {
-  //     _log(
-  //       'NAV## NO NEXT BEACON '
-  //           'current=${current.name} '
-  //           'destination=${destinationBeacon?.name ?? "null"} '
-  //           'currentIndex=$currentIndex '
-  //           'pathLength=${currentPath.length}',
-  //     );
-  //
-  //     return null;
-  //   }
-  //
-  //   // -------------------------------------------------------------------------
-  //   // NEXT BEACON CONFIG
-  //   // -------------------------------------------------------------------------
-  //
-  //   // _log(
-  //   //   'NAV## NEXT BEACON CONFIG '
-  //   //       'name=${next.name} '
-  //   //       'id=${next.id}',
-  //   // );
-  //
-  //   // -------------------------------------------------------------------------
-  //   // CHECK ALL VISIBLE BLE BEACONS
-  //   // -------------------------------------------------------------------------
-  //
-  //   // _log(
-  //   //   'NAV## SCAN CONTAINS ${rssiByBleId.length} BLE BEACONS',
-  //   // );
-  //
-  //   for (final entry in rssiByBleId.entries) {
-  //     final bleId = entry.key;
-  //     final rawRssi = entry.value;
-  //
-  //     final beacon = storeMap.beaconByBleId(
-  //       bleId,
-  //     );
-  //
-  //     // _log(
-  //     //   'NAV## SCAN BEACON '
-  //     //       'bleId=$bleId '
-  //     //       'rssi=${rawRssi.toStringAsFixed(1)} '
-  //     //       'mapped=${beacon?.name ?? "NULL"} '
-  //     //       'mappedId=${beacon?.id ?? "NULL"} '
-  //     //       'isNext=${beacon?.id == next.id}',
-  //     // );
-  //
-  //     if (beacon == null) {
-  //       continue;
-  //     }
-  //
-  //     if (beacon.id != next.id) {
-  //       continue;
-  //     }
-  //
-  //     final emaRssi = _rssiEma[bleId];
-  //     final effectiveRssi = emaRssi ?? rawRssi;
-  //     //
-  //     // _log(
-  //     //   'NAV## NEXT BEACON VISIBLE '
-  //     //       '${current.name} → ${beacon.name} '
-  //     //       'bleId=$bleId '
-  //     //       'raw=${rawRssi.toStringAsFixed(1)} '
-  //     //       'ema=${emaRssi?.toStringAsFixed(1) ?? "none"} '
-  //     //       'effective=${effectiveRssi.toStringAsFixed(1)}',
-  //     // );
-  //
-  //     return beacon;
-  //   }
-  //
-  //   // -------------------------------------------------------------------------
-  //   // NEXT NOT VISIBLE
-  //   // -------------------------------------------------------------------------
-  //
-  //
-  //   return null;
-  // }
-  // ---------------------------------------------------------------------------
-  // INITIAL FIX
-  // ---------------------------------------------------------------------------
 
   bool _isValidNavigationHop(Beacon candidate) {
     final current = currentBeacon;
@@ -2553,6 +2480,7 @@ class NavigationController extends ChangeNotifier {
   ) {
     final now = DateTime.now();
     _initialFixStartedAt ??= now;
+    _freeRoamTriangulatedFix = null;
 
     final staleWindowIds = _initialFixRssiWindows.keys.where((beaconId) {
       final lastSeenAt = _initialFixLastSeenAt[beaconId];
@@ -2773,11 +2701,18 @@ class NavigationController extends ChangeNotifier {
         final strongestRssi = triangulationRssiByBeaconId.values.isEmpty
             ? null
             : triangulationRssiByBeaconId.values.reduce(math.max);
+        final physicallyReachable = nearestBeacon == null ||
+            _isPhysicallyReachable(
+              nearestBeacon,
+              rssiByBleId,
+              requireGraphPath: true,
+            );
         if (nearestBeacon != null &&
             nearestRssi != null &&
             strongestRssi != null &&
             nearestDistanceMeters <= 4.0 &&
-            strongestRssi - nearestRssi <= 2.0) {
+            strongestRssi - nearestRssi <= 2.0 &&
+            physicallyReachable) {
           _log(
             'NAV## FREE_ROAM_INITIAL_TRIANGULATION ACCEPT '
             'update=$_rssiUpdateCount '
@@ -2786,11 +2721,14 @@ class NavigationController extends ChangeNotifier {
             'contributors=${estimate.contributors} '
             'residual=${residual.toStringAsFixed(2)}m',
           );
+          _freeRoamTriangulatedFix =
+              _projectFreeRoamFix(estimate.position, nearestBeacon, now);
           return nearestBeacon;
         } else {
           _log(
             'NAV## FREE_ROAM_INITIAL_TRIANGULATION REJECT '
-            'update=$_rssiUpdateCount reason=nearest_beacon_gate '
+            'update=$_rssiUpdateCount '
+            'reason=${!physicallyReachable ? "physical_reachability" : "nearest_beacon_gate"} '
             'candidate=${nearestBeacon?.name ?? "none"} '
             'nearestRssi=${nearestRssi?.toStringAsFixed(1) ?? "none"} '
             'strongestRssi=${strongestRssi?.toStringAsFixed(1) ?? "none"} '
@@ -2843,7 +2781,6 @@ class NavigationController extends ChangeNotifier {
 
     final bestId = ranked.first.key;
     final bestAvg = ranked.first.value;
-
 
     final elapsed = DateTime.now().difference(
       _initialFixStartedAt!,
@@ -3194,7 +3131,6 @@ class NavigationController extends ChangeNotifier {
     _isInitialFixComplete = true;
     return storeMap.beaconById(bestId);
   }
-
 
   // ---------------------------------------------------------------------------
   // P0: NAVIGATION HOP VALIDATION
@@ -3756,8 +3692,9 @@ class NavigationController extends ChangeNotifier {
   ///
   bool _isPhysicallyReachable(
     Beacon candidate,
-    Map<String, double> rssiByBleId,
-  ) {
+    Map<String, double> rssiByBleId, {
+    bool requireGraphPath = false,
+  }) {
     final anchor = currentBeacon;
 
     if (anchor == null) {
@@ -3782,6 +3719,12 @@ class NavigationController extends ChangeNotifier {
 
     if (routeResult.path.isNotEmpty) {
       walkingDistanceMeters = routeResult.distanceMeters;
+    } else if (requireGraphPath) {
+      _log(
+        'NAV### reachability check FAILED: ${candidate.name} has no graph '
+        'route from ${anchor.name} → NOT REACHABLE',
+      );
+      return false;
     } else {
       walkingDistanceMeters = (candidate.position - anchor.position).distance *
           storeMap.metersPerUnit;
@@ -4444,14 +4387,21 @@ class NavigationController extends ChangeNotifier {
   // BEACON CONFIRMATION / VISUAL CORRECTION
   // ---------------------------------------------------------------------------
 
-  void _snapToCurrentBeacon() {
+  void _snapToCurrentBeacon({
+    Offset? freeRoamPosition,
+    Offset? initialPosition,
+  }) {
     final beacon = currentBeacon;
 
     if (beacon == null) {
       return;
     }
 
-    final snap = beacon.position;
+    // Free roam may place the user on the corridor x,y from triangulation;
+    // destination navigation always anchors at the beacon.
+    final snap = destinationBeacon == null && freeRoamPosition != null
+        ? freeRoamPosition
+        : beacon.position;
 
     final current = liveUserPosition ?? _targetPosition ?? beacon.position;
 
@@ -4472,7 +4422,18 @@ class NavigationController extends ChangeNotifier {
 
     _segmentBoundarySince = null;
 
-    _metersSinceBeacon = 0.0;
+    final initialDistanceMeters = initialPosition == null
+        ? null
+        : _distanceFromBeaconToPositionMeters(beacon, initialPosition);
+    _metersSinceBeacon = initialDistanceMeters ?? 0.0;
+
+    if (initialDistanceMeters != null && initialDistanceMeters > 0.0) {
+      _log(
+        'NAV## initial distance seeded '
+        'beacon=${beacon.name} '
+        'distance=${initialDistanceMeters.toStringAsFixed(2)}m',
+      );
+    }
 
     // New segment => old RSSI trend is invalid.
     _nextBeaconRssiWindow.clear();
@@ -4521,7 +4482,132 @@ class NavigationController extends ChangeNotifier {
         '→ hard recovery reset',
       );
     }
+
   }
+
+  double? _distanceFromBeaconToPositionMeters(
+    Beacon beacon,
+    Offset position,
+  ) {
+    var closestDistanceSquared = double.infinity;
+    var closestAlongMapUnits = 0.0;
+
+    for (final edge in storeMap.edges) {
+      if (edge.from != beacon.id && edge.to != beacon.id) continue;
+
+      final points = storeMap.edgePath(edge, beacon.id);
+      if (points.length < 2) continue;
+
+      var walkedMapUnits = 0.0;
+      for (var index = 0; index < points.length - 1; index++) {
+        final start = points[index];
+        final end = points[index + 1];
+        final delta = end - start;
+        final lengthSquared = delta.distanceSquared;
+        final length = math.sqrt(lengthSquared);
+        final fraction = lengthSquared == 0.0
+            ? 0.0
+            : (((position - start).dx * delta.dx +
+                        (position - start).dy * delta.dy) /
+                    lengthSquared)
+                .clamp(0.0, 1.0)
+                .toDouble();
+        final projected = start + delta * fraction;
+        final distanceSquared = (position - projected).distanceSquared;
+
+        if (distanceSquared < closestDistanceSquared) {
+          closestDistanceSquared = distanceSquared;
+          closestAlongMapUnits = walkedMapUnits + length * fraction;
+        }
+        walkedMapUnits += length;
+      }
+    }
+
+    if (!closestDistanceSquared.isFinite) return null;
+
+    final distanceFromPathMeters =
+        math.sqrt(closestDistanceSquared) * storeMap.metersPerUnit;
+    if (distanceFromPathMeters > _freeRoamFixMaxProjectionMeters) {
+      return null;
+    }
+
+    return closestAlongMapUnits * storeMap.metersPerUnit;
+  }
+
+  /// Projects a triangulated [position] onto the closest corridor polyline
+  /// (beacon → waypoints → beacon) touching [beacon]. Returns null when the
+  /// beacon has no corridors or the projection is too far from [position].
+  _FreeRoamTriangulatedFix? _projectFreeRoamFix(
+    Offset position,
+    Beacon beacon,
+    DateTime now,
+  ) {
+    Offset? bestPoint;
+    var bestDistance = double.infinity;
+    for (final edge in storeMap.edges) {
+      if (edge.from != beacon.id && edge.to != beacon.id) continue;
+      final a = storeMap.beaconById(edge.from)?.position;
+      final b = storeMap.beaconById(edge.to)?.position;
+      if (a == null || b == null) continue;
+      final polyline = [a, ...edge.waypoints, b];
+      for (var i = 0; i < polyline.length - 1; i++) {
+        final projected =
+            _projectOntoSegment(position, polyline[i], polyline[i + 1]);
+        final distance = (projected - position).distance;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestPoint = projected;
+        }
+      }
+    }
+
+    final distanceMeters = bestDistance * storeMap.metersPerUnit;
+    if (bestPoint == null || distanceMeters > _freeRoamFixMaxProjectionMeters) {
+      _log(
+        'NAV## FREE_ROAM_XY fallback=beacon ${beacon.name} '
+        'raw=${_formatOffset(position)} '
+        'reason=${bestPoint == null ? "no_corridor" : "projection_${distanceMeters.toStringAsFixed(1)}m"}',
+      );
+      return null;
+    }
+
+    _log(
+      'NAV## FREE_ROAM_XY projected ${beacon.name} '
+      'raw=${_formatOffset(position)} '
+      'corridor=${_formatOffset(bestPoint)} '
+      'offset=${distanceMeters.toStringAsFixed(1)}m',
+    );
+    return _FreeRoamTriangulatedFix(
+      beaconId: beacon.id,
+      position: bestPoint,
+      acceptedAt: now,
+    );
+  }
+
+  /// Returns and clears the fresh free-roam fix belonging to [beacon].
+  Offset? _takeFreeRoamFixFor(Beacon beacon, DateTime now) {
+    final fix = _freeRoamTriangulatedFix;
+    _freeRoamTriangulatedFix = null;
+    if (destinationBeacon != null ||
+        fix == null ||
+        fix.beaconId != beacon.id ||
+        now.difference(fix.acceptedAt) > _freeRoamFixMaxAge) {
+      return null;
+    }
+    return fix.position;
+  }
+
+  static Offset _projectOntoSegment(Offset p, Offset a, Offset b) {
+    final ab = b - a;
+    final lengthSquared = ab.dx * ab.dx + ab.dy * ab.dy;
+    if (lengthSquared == 0) return a;
+    final t = (((p.dx - a.dx) * ab.dx + (p.dy - a.dy) * ab.dy) / lengthSquared)
+        .clamp(0.0, 1.0);
+    return Offset(a.dx + ab.dx * t, a.dy + ab.dy * t);
+  }
+
+  static String _formatOffset(Offset o) =>
+      '(${o.dx.toStringAsFixed(1)},${o.dy.toStringAsFixed(1)})';
 
   // ---------------------------------------------------------------------------
   // PDR STEP
@@ -4925,17 +5011,12 @@ class NavigationController extends ChangeNotifier {
             endBeacon.id,
           );
 
-    final waypoints = edge == null
-        ? const <Offset>[]
-        : edge.from == start.id
-            ? edge.waypoints
-            : edge.waypoints.reversed.toList();
+    if (edge != null) {
+      final points = storeMap.edgePath(edge, start.id);
+      if (points.length >= 2) return points;
+    }
 
-    return [
-      start.position,
-      ...waypoints,
-      endPosition,
-    ];
+    return [start.position, endPosition];
   }
 
   // ---------------------------------------------------------------------------
@@ -5318,4 +5399,16 @@ class NavigationController extends ChangeNotifier {
 
     super.dispose();
   }
+}
+
+class _FreeRoamTriangulatedFix {
+  const _FreeRoamTriangulatedFix({
+    required this.beaconId,
+    required this.position,
+    required this.acceptedAt,
+  });
+
+  final String beaconId;
+  final Offset position;
+  final DateTime acceptedAt;
 }
