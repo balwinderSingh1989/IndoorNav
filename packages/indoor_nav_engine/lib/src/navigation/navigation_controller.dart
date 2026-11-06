@@ -64,6 +64,20 @@ class _BeaconCandidateState {
   _BeaconCandidateState(this.beacon);
 }
 
+class _SwitchConfidence {
+  const _SwitchConfidence({
+    required this.score,
+    required this.routeCompatible,
+    required this.physicallyReachable,
+    required this.routeProgress,
+  });
+
+  final double score;
+  final bool routeCompatible;
+  final bool physicallyReachable;
+  final double? routeProgress;
+}
+
 /// Central navigation state.
 ///
 /// BLE provides discrete beacon observations.
@@ -80,6 +94,9 @@ class _BeaconCandidateState {
 /// persistence and trend are then used as additional confidence gates.
 class NavigationController extends ChangeNotifier {
   static const double _bleRouteProgressBlend = 0.20;
+  static const double _routeProgressEarlyThreshold = 0.35;
+  static const double _routeProgressLateThreshold = 0.75;
+  static const double _routeProgressConfidenceAdjustment = 0.10;
 
   NavigationController({
     required this.storeMap,
@@ -508,6 +525,15 @@ class NavigationController extends ChangeNotifier {
   /// Current rendered user position.
   Offset? liveUserPosition;
 
+  /// Position from which the active destination route should begin.
+  ///
+  /// This is deliberately separate from [currentBeacon]. The beacon remains
+  /// the BLE/navigation anchor, while a live or triangulated position avoids
+  /// making a reroute appear to start at a beacon the user has not reached.
+  Offset? _routeOriginPosition;
+
+  Offset? get routeOriginPosition => _routeOriginPosition;
+
   /// Last unconstrained EMA trilateration point, for Survey diagnostics.
   Offset? rawTrilateratedPosition;
 
@@ -917,6 +943,22 @@ class NavigationController extends ChangeNotifier {
             'margin=${marginDb.toStringAsFixed(1)}dB required=${requiredMargin.toStringAsFixed(1)}dB '
             '${isAdjacent ? "(adjacent: 9dB required)" : "(non-adjacent: 6dB OK)"}',
           );
+
+          final confidence = _switchConfidence(
+            candidate,
+            rssiByBleId,
+            routeCompatible: true,
+          );
+          _log(
+            'NAV## [1.75/4] FREE-ROAM confidence '
+            '${candidate.name}=${confidence.score.toStringAsFixed(2)} '
+            'threshold=${navigationConfig.freeRoamConfidenceThreshold.toStringAsFixed(2)} '
+            'reachable=${confidence.physicallyReachable}',
+          );
+          if (confidence.score < navigationConfig.freeRoamConfidenceThreshold) {
+            _clearPendingBeaconCandidate();
+            return;
+          }
         }
       }
 
@@ -1316,10 +1358,14 @@ class NavigationController extends ChangeNotifier {
       // period but no longer be valid now.
       // ---------------------------------------------------------------------
 
-      if (!_isNavigationHopValid(
-        previousBeacon,
-        candidate,
-      )) {
+      // Preserve the original strict anti-teleport behavior when off-route
+      // detection is disabled. Only enabled off-route navigation uses the
+      // broader validation that permits a reroute anchor.
+      final finalHopIsValid = allowOffRouteBeacons
+          ? _isValidNavigationHop(candidate)
+          : _isNavigationHopValid(previousBeacon, candidate);
+
+      if (!finalHopIsValid) {
         _clearPendingBeaconCandidate();
         _log(
           'NAV## TELEPORT BLOCKED at confirmation: '
@@ -1429,6 +1475,8 @@ class NavigationController extends ChangeNotifier {
 
       _snapToCurrentBeacon(
         initialPosition: previousBeacon == null ? liveUserPosition : null,
+        preserveLivePosition: previousBeacon != null &&
+            !prevPath.any((beacon) => beacon.id == candidate.id),
       );
 
       status = candidate.id == destinationBeacon?.id
@@ -2210,6 +2258,15 @@ class NavigationController extends ChangeNotifier {
     // -----------------------------------------------------------------------
 
     final current = currentBeacon!;
+    final visibleBeaconSummary = rssiByBleId.entries.map((entry) {
+      final beacon = storeMap.beaconByBleId(entry.key);
+      return '${beacon?.name ?? "unknown:${entry.key}"}='
+          '${entry.value.toStringAsFixed(1)}';
+    }).join(', ');
+    _log(
+      'NAV## OFF-ROUTE INPUT current=${current.name} '
+      'visible=${visibleBeaconSummary.isEmpty ? "none" : visibleBeaconSummary}',
+    );
 
     final currentIndex = currentPath.indexWhere(
       (b) => b.id == current.id,
@@ -2399,10 +2456,376 @@ class NavigationController extends ChangeNotifier {
         '${secondaryRssi?.toStringAsFixed(1) ?? "none"}',
       );
 
+      if (allowOffRouteBeacons) {
+        final offRoute = _selectOffRouteCandidate(
+          rssiByBleId,
+          primaryRssi,
+        );
+        if (offRoute != null) {
+          return offRoute;
+        }
+      }
+
       return primary;
     }
 
+    if (allowOffRouteBeacons) {
+      return _selectOffRouteCandidate(rssiByBleId, null);
+    }
+
     return null;
+  }
+
+  Beacon? _selectOffRouteCandidate(
+    Map<String, double> rssiByBleId,
+    double? routeCandidateRssi,
+  ) {
+    final current = currentBeacon;
+    if (current == null) {
+      return null;
+    }
+
+    final routeIds = currentPath.map((beacon) => beacon.id).toSet();
+    final candidates = <Beacon>[];
+    for (final entry in rssiByBleId.entries) {
+      final beacon = storeMap.beaconByBleId(entry.key);
+      if (beacon == null) {
+        _log(
+          'NAV## OFF-ROUTE REJECTED bleId=${entry.key} '
+          'reason=unknown-beacon',
+        );
+        continue;
+      }
+      if (beacon.id == current.id) {
+        _log(
+          'NAV## OFF-ROUTE REJECTED beacon=${beacon.name} '
+          'reason=current-anchor',
+        );
+        continue;
+      }
+      if (routeIds.contains(beacon.id)) {
+        _log(
+          'NAV## OFF-ROUTE REJECTED beacon=${beacon.name} '
+          'reason=already-on-route',
+        );
+        continue;
+      }
+
+      final rssi = _smoothedRssi(beacon.id) ?? entry.value;
+      final currentRssi =
+          _smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId);
+      final comparisonRssi = [
+        routeCandidateRssi,
+        currentRssi,
+      ].whereType<double>().fold<double?>(
+            null,
+            (strongest, value) =>
+                strongest == null ? value : math.max(strongest, value),
+          );
+      if (comparisonRssi != null &&
+          rssi < comparisonRssi + navigationConfig.offRouteCandidateLeadDb) {
+        _log(
+          'NAV## OFF-ROUTE REJECTED beacon=${beacon.name} '
+          'rssi=${rssi.toStringAsFixed(1)} '
+          'requiredLead='
+          '${(comparisonRssi + navigationConfig.offRouteCandidateLeadDb).toStringAsFixed(1)} '
+          'comparison=${routeCandidateRssi != null && currentRssi != null ? "strongest-route-or-current" : routeCandidateRssi != null ? "route-candidate" : "current-anchor"} '
+          'reason=insufficient-rssi-lead',
+        );
+        continue;
+      }
+      candidates.add(beacon);
+    }
+
+    candidates.sort((a, b) {
+      final aRssi =
+          _smoothedRssi(a.id) ?? _rssiForBeacon(a, rssiByBleId) ?? -100;
+      final bRssi =
+          _smoothedRssi(b.id) ?? _rssiForBeacon(b, rssiByBleId) ?? -100;
+      return bRssi.compareTo(aRssi);
+    });
+
+    if (candidates.isEmpty) {
+      _log(
+        'NAV## OFF-ROUTE REJECTED reason=no-candidates-after-basic-filters',
+      );
+      return null;
+    }
+    final candidate = candidates.first;
+    final candidateRssi =
+        _smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId);
+
+    if (!_routeContinuationIsUnavailable(
+      rssiByBleId,
+      offRouteCandidateRssi: candidateRssi,
+    )) {
+      _log(
+        'NAV## off-route candidate deferred: '
+        'route continuation still has usable/improving beacon evidence',
+      );
+      return null;
+    }
+
+    final confidence = _switchConfidence(candidate, rssiByBleId);
+    if (confidence.score < navigationConfig.offRouteConfidenceThreshold) {
+      _log(
+        'NAV## OFF-ROUTE REJECTED beacon=${candidate.name} '
+        'confidence=${confidence.score.toStringAsFixed(2)} '
+        'threshold=${navigationConfig.offRouteConfidenceThreshold.toStringAsFixed(2)} '
+        'reachable=${confidence.physicallyReachable} '
+        'reason=low-confidence',
+      );
+      return null;
+    }
+
+    _log(
+      'NAV## off-route candidate selected ${candidate.name} '
+      'confidence=${confidence.score.toStringAsFixed(2)} '
+      'threshold=${navigationConfig.offRouteConfidenceThreshold.toStringAsFixed(2)} '
+      'reachable=${confidence.physicallyReachable}',
+    );
+    return candidate;
+  }
+
+  bool _routeContinuationIsUnavailable(
+    Map<String, double> rssiByBleId, {
+    double? offRouteCandidateRssi,
+  }) {
+    final current = currentBeacon;
+    if (current == null || currentPath.isEmpty) {
+      return false;
+    }
+
+    final currentIndex = currentPath.indexWhere(
+      (beacon) => beacon.id == current.id,
+    );
+    if (currentIndex < 0 || currentIndex + 1 >= currentPath.length) {
+      return false;
+    }
+
+    final lookahead =
+        currentPath.skip(currentIndex + 1).take(2).toList(growable: false);
+    var hasObservedRouteBeacon = false;
+
+    for (final beacon in lookahead) {
+      final rssi =
+          _smoothedRssi(beacon.id) ?? _rssiForBeacon(beacon, rssiByBleId);
+      if (rssi == null) {
+        _log(
+          'NAV## OFF-ROUTE GUARD routeBeacon=${beacon.name} '
+          'rssi=none trend=unknown unavailable=true reason=no-reading',
+        );
+        continue;
+      }
+
+      hasObservedRouteBeacon = true;
+      final trend = _getRssiTrend(beacon.id);
+      final unavailable = rssi <= navigationConfig.offRouteRouteBeaconMaxRssi &&
+          trend != _RssiTrend.towardNext;
+      _log(
+        'NAV## OFF-ROUTE GUARD routeBeacon=${beacon.name} '
+        'rssi=${rssi.toStringAsFixed(1)} '
+        'trend=$trend '
+        'threshold=${navigationConfig.offRouteRouteBeaconMaxRssi.toStringAsFixed(1)} '
+        'unavailable=$unavailable',
+      );
+      if (!unavailable) {
+        _log(
+          'NAV## OFF-ROUTE GUARD blocked: '
+          '${beacon.name} remains usable or is improving',
+        );
+        return false;
+      }
+    }
+
+    // Missing route readings alone are not enough. They can qualify only
+    // after PDR has progressed beyond the next route segment and the
+    // off-route candidate has a strong RSSI lead.
+    if (!hasObservedRouteBeacon) {
+      final next = lookahead.first;
+      final routeDistance =
+          _pathfinder.findPath(storeMap, current.id, next.id).distanceMeters;
+      final currentRssi =
+          _smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId);
+      final candidateHasStrongLead = offRouteCandidateRssi != null &&
+          (currentRssi == null ||
+              offRouteCandidateRssi >=
+                  currentRssi + navigationConfig.offRouteCandidateLeadDb);
+      final progressedBeyondNext =
+          routeDistance > 0.0 && _metersSinceBeacon >= routeDistance;
+
+      if (progressedBeyondNext && candidateHasStrongLead) {
+        _log(
+          'NAV## OFF-ROUTE GUARD passed: '
+          'route beacons have no readings, '
+          'progress=${_metersSinceBeacon.toStringAsFixed(2)}m/'
+          '${routeDistance.toStringAsFixed(2)}m '
+          'candidateLead=${candidateHasStrongLead}',
+        );
+        return true;
+      }
+
+      _log(
+        'NAV## OFF-ROUTE GUARD blocked: '
+        'no route continuation beacon has an observed RSSI; '
+        'progress=${_metersSinceBeacon.toStringAsFixed(2)}m/'
+        '${routeDistance.toStringAsFixed(2)}m '
+        'candidateLead=$candidateHasStrongLead',
+      );
+      return false;
+    }
+
+    _log(
+      'NAV## OFF-ROUTE GUARD passed: '
+      'next route beacon evidence is weak and not improving',
+    );
+    return true;
+  }
+
+  bool _isOffRouteCandidate(Beacon candidate) {
+    return destinationBeacon != null &&
+        currentPath.isNotEmpty &&
+        !currentPath.any((beacon) => beacon.id == candidate.id);
+  }
+
+  _SwitchConfidence _switchConfidence(
+    Beacon candidate,
+    Map<String, double> rssiByBleId, {
+    bool? routeCompatible,
+  }) {
+    final current = currentBeacon;
+    final candidateRssi =
+        _smoothedRssi(candidate.id) ?? _rssiForBeacon(candidate, rssiByBleId);
+    final currentRssi = current == null
+        ? null
+        : (_smoothedRssi(current.id) ?? _rssiForBeacon(current, rssiByBleId));
+
+    final rssiScore = candidateRssi == null || currentRssi == null
+        ? 0.5
+        : ((candidateRssi - currentRssi + 5.0) / 10.0).clamp(0.0, 1.0);
+
+    List<double>? history;
+    for (final entry in _rssiHistory.entries) {
+      if (candidate.matchesBleId(entry.key)) {
+        history = entry.value;
+        break;
+      }
+    }
+    final persistenceScore = history == null
+        ? 0.0
+        : (history.length / _requiredConsecutiveReadings).clamp(0.0, 1.0);
+
+    final physicallyReachable =
+        current == null || _isPhysicallyReachable(candidate, rssiByBleId);
+    final movementScore = current == null
+        ? 0.5
+        : (_getRssiTrend(candidate.id) == _RssiTrend.towardNext ||
+                _getRssiTrend(current.id) == _RssiTrend.awayFromNext
+            ? 1.0
+            : _getRssiTrend(candidate.id) == _RssiTrend.awayFromNext
+                ? 0.0
+                : 0.5);
+
+    final routeMatch = routeCompatible ??
+        (destinationBeacon == null ||
+            currentPath.any((beacon) => beacon.id == candidate.id));
+
+    final triangulatedPosition =
+        _freeRoamTriangulatedFix?.beaconId == candidate.id
+            ? candidate.position
+            : _triangulatedRouteTarget;
+    final triangulationScore = triangulatedPosition == null
+        ? 0.5
+        : ((candidate.position - triangulatedPosition).distance *
+                    storeMap.metersPerUnit <=
+                3.0)
+            ? 1.0
+            : 0.0;
+
+    final score = (rssiScore * 0.30) +
+        (persistenceScore * 0.20) +
+        (physicallyReachable ? 0.25 : 0.0) +
+        (movementScore * 0.15) +
+        (triangulationScore * 0.10);
+
+    final routeProgress = _routeProgressToCandidate(candidate);
+    final routeProgressAdjustment = routeProgress == null
+        ? 0.0
+        : routeProgress < _routeProgressEarlyThreshold
+            ? -_routeProgressConfidenceAdjustment
+            : routeProgress >= _routeProgressLateThreshold
+                ? _routeProgressConfidenceAdjustment
+                : 0.0;
+
+    return _SwitchConfidence(
+      score: (score + (routeMatch ? 0.05 : 0.0) + routeProgressAdjustment)
+          .clamp(0.0, 1.0),
+      routeCompatible: routeMatch,
+      physicallyReachable: physicallyReachable,
+      routeProgress: routeProgress,
+    );
+  }
+
+  /// Returns progress along the current beacon → candidate edge when the
+  /// projected position is close enough to that edge to be trustworthy.
+  ///
+  /// A missing or distant projection deliberately returns null so candidate
+  /// selection falls back to the existing RSSI and safety behavior.
+  double? _routeProgressToCandidate(Beacon candidate) {
+    final current = currentBeacon;
+    if (destinationBeacon == null || current == null) return null;
+    final next = _pathBeaconAfter(current.id);
+    if (next == null || next.id != candidate.id) return null;
+
+    final position =
+        routeConstrainedPosition ?? liveUserPosition ?? _pdrTargetPosition;
+    if (position == null) return null;
+
+    final edge = storeMap.edgeBetween(current.id, candidate.id);
+    final points = edge == null
+        ? [current.position, candidate.position]
+        : storeMap.edgePath(edge, current.id);
+    if (points.length < 2) return null;
+
+    var totalLength = 0.0;
+    for (var index = 0; index < points.length - 1; index++) {
+      totalLength += (points[index + 1] - points[index]).distance;
+    }
+    if (totalLength <= 0.0) return null;
+
+    var bestDistanceSquared = double.infinity;
+    var bestAlong = 0.0;
+    var distanceBeforeSegment = 0.0;
+    for (var index = 0; index < points.length - 1; index++) {
+      final start = points[index];
+      final end = points[index + 1];
+      final delta = end - start;
+      final lengthSquared = delta.distanceSquared;
+      final segmentLength = math.sqrt(lengthSquared);
+      if (segmentLength == 0.0) continue;
+
+      final fraction = (((position - start).dx * delta.dx +
+                  (position - start).dy * delta.dy) /
+              lengthSquared)
+          .clamp(0.0, 1.0)
+          .toDouble();
+      final projected = start + delta * fraction;
+      final distanceSquared = (position - projected).distanceSquared;
+      if (distanceSquared < bestDistanceSquared) {
+        bestDistanceSquared = distanceSquared;
+        bestAlong = distanceBeforeSegment + segmentLength * fraction;
+      }
+      distanceBeforeSegment += segmentLength;
+    }
+
+    final maxProjectionUnits =
+        _freeRoamFixMaxProjectionMeters / storeMap.metersPerUnit;
+    if (!bestDistanceSquared.isFinite ||
+        math.sqrt(bestDistanceSquared) > maxProjectionUnits) {
+      return null;
+    }
+
+    return (bestAlong / totalLength).clamp(0.0, 1.0);
   }
 
   bool _isValidNavigationHop(Beacon candidate) {
@@ -2415,7 +2838,7 @@ class NavigationController extends ChangeNotifier {
     final next = _pathBeaconAfter(current.id);
 
     if (next == null) {
-      return false;
+      return allowOffRouteBeacons && _isOffRouteCandidate(candidate);
     }
 
     // Normal hop.
@@ -2426,9 +2849,10 @@ class NavigationController extends ChangeNotifier {
     // Only allow one controlled secondary hop.
     final secondary = _pathBeaconAfter(next.id);
 
-    return _enableRouteLookAhead &&
-        secondary?.id == candidate.id &&
-        _primaryHasBeenPassed();
+    return (_enableRouteLookAhead &&
+            secondary?.id == candidate.id &&
+            _primaryHasBeenPassed()) ||
+        (allowOffRouteBeacons && _isOffRouteCandidate(candidate));
   }
 
   _InitialFixTrend _getInitialFixTrend(String beaconId) {
@@ -2707,10 +3131,15 @@ class NavigationController extends ChangeNotifier {
               rssiByBleId,
               requireGraphPath: true,
             );
+        final projectedFix = nearestBeacon == null
+            ? null
+            : _projectFreeRoamFix(estimate.position, nearestBeacon, now);
+        final withinBeaconDistanceThreshold = nearestDistanceMeters <= 4.0;
+        final supportedByCorridor = projectedFix != null;
         if (nearestBeacon != null &&
             nearestRssi != null &&
             strongestRssi != null &&
-            nearestDistanceMeters <= 4.0 &&
+            (withinBeaconDistanceThreshold || supportedByCorridor) &&
             strongestRssi - nearestRssi <= 2.0 &&
             physicallyReachable) {
           _log(
@@ -2718,11 +3147,11 @@ class NavigationController extends ChangeNotifier {
             'update=$_rssiUpdateCount '
             '${nearestBeacon.name} '
             'distance=${nearestDistanceMeters.toStringAsFixed(1)}m '
+            'support=${withinBeaconDistanceThreshold ? "beacon_distance" : "corridor_projection"} '
             'contributors=${estimate.contributors} '
             'residual=${residual.toStringAsFixed(2)}m',
           );
-          _freeRoamTriangulatedFix =
-              _projectFreeRoamFix(estimate.position, nearestBeacon, now);
+          _freeRoamTriangulatedFix = projectedFix;
           return nearestBeacon;
         } else {
           _log(
@@ -2733,6 +3162,7 @@ class NavigationController extends ChangeNotifier {
             'nearestRssi=${nearestRssi?.toStringAsFixed(1) ?? "none"} '
             'strongestRssi=${strongestRssi?.toStringAsFixed(1) ?? "none"} '
             'distance=${nearestDistanceMeters.toStringAsFixed(1)}m '
+            'corridorSupport=$supportedByCorridor '
             'contributors=${estimate.contributors} '
             'residual=${residual.toStringAsFixed(2)}m',
           );
@@ -3256,13 +3686,58 @@ class NavigationController extends ChangeNotifier {
       return false;
     }
 
+    final routeCompatible = _isValidNavigationHop(candidate);
+    final offRouteCandidate =
+        allowOffRouteBeacons && _isOffRouteCandidate(candidate);
+
     // ------------------------------------------------------------
-    // 1. Validate that candidate belongs to the route.
+    // 1. Validate route compatibility or establish a credible
+    //    off-route anchor.
     // ------------------------------------------------------------
-    if (!_isValidNavigationHop(candidate)) {
+    if (!routeCompatible && !offRouteCandidate) {
       _log(
         'NAV### REJECT ${candidate.name}: invalid navigation hop '
         'current=${current.name}',
+      );
+      return false;
+    }
+
+    final confidence = _switchConfidence(
+      candidate,
+      rssiByBleId,
+      routeCompatible: routeCompatible,
+    );
+    _log(
+      'NAV### SWITCH CONFIDENCE '
+      '${current.name} → ${candidate.name} '
+      'score=${confidence.score.toStringAsFixed(2)} '
+      'threshold=${navigationConfig.switchConfidenceThreshold.toStringAsFixed(2)} '
+      'routeProgress=${confidence.routeProgress?.toStringAsFixed(2) ?? "none"} '
+      'routeCompatible=$routeCompatible '
+      'offRoute=$offRouteCandidate '
+      'reachable=${confidence.physicallyReachable}',
+    );
+    final confidenceThreshold = offRouteCandidate
+        ? navigationConfig.offRouteConfidenceThreshold
+        : navigationConfig.switchConfidenceThreshold;
+    if ((!confidence.physicallyReachable && !offRouteCandidate) ||
+        confidence.score < confidenceThreshold) {
+      return false;
+    }
+
+    if (offRouteCandidate) {
+      _log(
+        'NAV### OFF-ROUTE ANCHOR ACCEPTED '
+        '${current.name} → ${candidate.name}',
+      );
+      return true;
+    }
+
+    if (!_isWithinBeaconHandoffDistance(candidate)) {
+      _log(
+        'NAV### SWITCH WAIT ${current.name} → ${candidate.name} '
+        'reason=user is not within beacon handoff distance '
+        'threshold=${navigationConfig.beaconHandoffDistanceMeters.toStringAsFixed(2)}m',
       );
       return false;
     }
@@ -3590,6 +4065,54 @@ class NavigationController extends ChangeNotifier {
     );
 
     return false;
+  }
+
+  bool _isWithinBeaconHandoffDistance(Beacon candidate) {
+    final current = currentBeacon;
+    if (current == null) {
+      return false;
+    }
+
+    final currentPosition =
+        liveUserPosition ?? _pdrTargetPosition ?? _targetPosition;
+    final estimatedDistance = currentPosition == null
+        ? null
+        : _distanceFromBeaconToPositionMeters(candidate, currentPosition);
+    if (estimatedDistance != null) {
+      final withinThreshold =
+          estimatedDistance <= navigationConfig.beaconHandoffDistanceMeters;
+      _log(
+        'NAV### beacon handoff distance '
+        '${current.name} → ${candidate.name} '
+        'estimated=${estimatedDistance.toStringAsFixed(2)}m '
+        'threshold=${navigationConfig.beaconHandoffDistanceMeters.toStringAsFixed(2)}m '
+        'within=$withinThreshold',
+      );
+      return withinThreshold;
+    }
+
+    final routeResult = _pathfinder.findPath(
+      storeMap,
+      current.id,
+      candidate.id,
+    );
+    if (routeResult.path.isEmpty) {
+      return false;
+    }
+
+    final remainingDistance =
+        math.max(0.0, routeResult.distanceMeters - _metersSinceBeacon);
+    final withinThreshold =
+        remainingDistance <= navigationConfig.beaconHandoffDistanceMeters;
+    _log(
+      'NAV### beacon handoff distance '
+      '${current.name} → ${candidate.name} '
+      'remaining=${remainingDistance.toStringAsFixed(2)}m '
+      'walked=${_metersSinceBeacon.toStringAsFixed(2)}m '
+      'threshold=${navigationConfig.beaconHandoffDistanceMeters.toStringAsFixed(2)}m '
+      'within=$withinThreshold',
+    );
+    return withinThreshold;
   }
 
   _RssiTrend _getRssiTrend(String beaconId) {
@@ -4390,6 +4913,7 @@ class NavigationController extends ChangeNotifier {
   void _snapToCurrentBeacon({
     Offset? freeRoamPosition,
     Offset? initialPosition,
+    bool preserveLivePosition = false,
   }) {
     final beacon = currentBeacon;
 
@@ -4399,9 +4923,11 @@ class NavigationController extends ChangeNotifier {
 
     // Free roam may place the user on the corridor x,y from triangulation;
     // destination navigation always anchors at the beacon.
-    final snap = destinationBeacon == null && freeRoamPosition != null
-        ? freeRoamPosition
-        : beacon.position;
+    final snap = preserveLivePosition && liveUserPosition != null
+        ? liveUserPosition!
+        : destinationBeacon == null && freeRoamPosition != null
+            ? freeRoamPosition
+            : beacon.position;
 
     final current = liveUserPosition ?? _targetPosition ?? beacon.position;
 
@@ -4468,7 +4994,8 @@ class NavigationController extends ChangeNotifier {
 
     final driftMeters = drift * storeMap.metersPerUnit;
 
-    if (driftMeters > _maxBeaconCorrectionResetMeters) {
+    if (driftMeters > _maxBeaconCorrectionResetMeters &&
+        !preserveLivePosition) {
       // Genuine recovery case.
       //
       // If we are >8m away from the newly confirmed beacon, keeping the
@@ -4482,7 +5009,6 @@ class NavigationController extends ChangeNotifier {
         '→ hard recovery reset',
       );
     }
-
   }
 
   double? _distanceFromBeaconToPositionMeters(
@@ -5311,7 +5837,13 @@ class NavigationController extends ChangeNotifier {
     rawTrilateratedPosition = null;
     routeConstrainedPosition = null;
 
-    currentDistanceMeters = result.distanceMeters;
+    final liveOrigin =
+        liveUserPosition ?? _pdrTargetPosition ?? _targetPosition;
+    _routeOriginPosition = liveOrigin;
+    final positionAwareDistance = liveOrigin == null
+        ? null
+        : _routeDistanceFromPositionMeters(liveOrigin, currentPath);
+    currentDistanceMeters = positionAwareDistance ?? result.distanceMeters;
 
     status = start.id == end.id
         ? NavigationStatus.arrived
@@ -5322,6 +5854,7 @@ class NavigationController extends ChangeNotifier {
       'destination=${end.name} '
       'nodes=${currentPath.length} '
       'distance=${currentDistanceMeters?.toStringAsFixed(1) ?? "none"}m '
+      'origin=${_routeOriginPosition == null ? "none" : _formatOffset(_routeOriginPosition!)} '
       'path=${currentPath.map((beacon) => beacon.name).join(" -> ")}',
     );
 
@@ -5345,6 +5878,58 @@ class NavigationController extends ChangeNotifier {
         '[unchanged]',
       );
     }
+  }
+
+  double? _routeDistanceFromPositionMeters(
+    Offset position,
+    List<Beacon> path,
+  ) {
+    if (path.length < 2) return 0.0;
+
+    var closestDistanceSquared = double.infinity;
+    var remainingMapUnits = double.infinity;
+    var distanceBeforeSegment = 0.0;
+
+    final segments = <(Offset, Offset, double)>[];
+    for (var index = 0; index < path.length - 1; index++) {
+      final edge = storeMap.edgeBetween(path[index].id, path[index + 1].id);
+      final points = edge == null
+          ? [path[index].position, path[index + 1].position]
+          : storeMap.edgePath(edge, path[index].id);
+      for (var pointIndex = 0; pointIndex < points.length - 1; pointIndex++) {
+        final start = points[pointIndex];
+        final end = points[pointIndex + 1];
+        final length = (end - start).distance;
+        if (length > 0) segments.add((start, end, length));
+      }
+    }
+
+    final totalMapUnits =
+        segments.fold<double>(0.0, (sum, segment) => sum + segment.$3);
+    for (final (start, end, length) in segments) {
+      final delta = end - start;
+      final fraction = (((position - start).dx * delta.dx +
+                  (position - start).dy * delta.dy) /
+              (length * length))
+          .clamp(0.0, 1.0)
+          .toDouble();
+      final projected = start + delta * fraction;
+      final distanceSquared = (position - projected).distanceSquared;
+      if (distanceSquared < closestDistanceSquared) {
+        closestDistanceSquared = distanceSquared;
+        remainingMapUnits =
+            totalMapUnits - distanceBeforeSegment - length * fraction;
+      }
+      distanceBeforeSegment += length;
+    }
+
+    if (!remainingMapUnits.isFinite ||
+        math.sqrt(closestDistanceSquared) * storeMap.metersPerUnit >
+            _freeRoamFixMaxProjectionMeters) {
+      return null;
+    }
+
+    return remainingMapUnits * storeMap.metersPerUnit;
   }
 
   // ---------------------------------------------------------------------------
