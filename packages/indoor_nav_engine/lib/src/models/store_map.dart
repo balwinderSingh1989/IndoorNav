@@ -5,21 +5,21 @@ import 'item.dart';
 
 /// An undirected aisle edge between two beacons with a physical distance.
 ///
-/// [waypoints] are purely geometric — intermediate points (in order from
-/// [from] to [to]) that bend the corridor's *shape* around obstacles a
-/// straight line between the two beacons would cut through. They are not
-/// graph nodes: routing (Dijkstra, in [PathfindingService]) only ever
-/// starts/ends at real beacons, exactly as many as there is physical
-/// hardware for — waypoints just make [StoreMap.snapToGraph] (and the
-/// drawn route line) follow the corridor's actual bend instead of an
-/// imaginary straight line between two beacons.
+/// When an edge has at least two [waypoints], they define its walkable
+/// geometry and distance. They are not graph nodes: routing still starts and
+/// ends at real beacons, while positioning follows the waypoint path. Edges
+/// without a usable waypoint path fall back to the beacon-to-beacon segment.
 class Edge {
   final String from;
   final String to;
   final double distanceMeters;
   final List<Offset> waypoints;
 
-  const Edge({required this.from, required this.to, required this.distanceMeters, this.waypoints = const []});
+  const Edge(
+      {required this.from,
+      required this.to,
+      required this.distanceMeters,
+      this.waypoints = const []});
 
   factory Edge.fromJson(Map<String, dynamic> json) {
     final rawWaypoints = json['waypoints'] as List?;
@@ -70,10 +70,13 @@ class BeaconPlacementConfig {
     return BeaconPlacementConfig(
       minSpacingMeters: (json['minSpacingMeters'] as num? ?? 3.0).toDouble(),
       maxSpacingMeters: (json['maxSpacingMeters'] as num? ?? 6.0).toDouble(),
-      targetSpacingMeters: (json['targetSpacingMeters'] as num? ?? 4.5).toDouble(),
+      targetSpacingMeters:
+          (json['targetSpacingMeters'] as num? ?? 4.5).toDouble(),
       maxBeaconsPerSegment: json['maxBeaconsPerSegment'] as int?,
-      axisToleranceUnits: (json['axisToleranceUnits'] as num? ?? 2.0).toDouble(),
-      dedupeRadiusMeters: (json['dedupeRadiusMeters'] as num? ?? 1.5).toDouble(),
+      axisToleranceUnits:
+          (json['axisToleranceUnits'] as num? ?? 2.0).toDouble(),
+      dedupeRadiusMeters:
+          (json['dedupeRadiusMeters'] as num? ?? 1.5).toDouble(),
       desiredBeaconCount: json['desiredBeaconCount'] as int?,
       mountOffsetXUnits: (json['mountOffsetXUnits'] as num? ?? 0.0).toDouble(),
       mountOffsetYUnits: (json['mountOffsetYUnits'] as num? ?? 0.0).toDouble(),
@@ -132,7 +135,8 @@ class StoreMap {
       mapWidth: (json['mapWidth'] as num).toDouble(),
       mapHeight: (json['mapHeight'] as num).toDouble(),
       metersPerUnit: (json['metersPerUnit'] as num? ?? 1.0).toDouble(),
-      mapNorthOffsetDegrees: (json['mapNorthOffsetDegrees'] as num? ?? 0.0).toDouble(),
+      mapNorthOffsetDegrees:
+          (json['mapNorthOffsetDegrees'] as num? ?? 0.0).toDouble(),
       beacons: (json['beacons'] as List)
           .map((b) => Beacon.fromJson(b as Map<String, dynamic>))
           .toList(),
@@ -142,7 +146,8 @@ class StoreMap {
       items: (json['items'] as List? ?? [])
           .map((i) => Item.fromJson(i as Map<String, dynamic>))
           .toList(),
-      beaconPlacement: BeaconPlacementConfig.fromJson(json['beaconPlacement'] as Map<String, dynamic>?),
+      beaconPlacement: BeaconPlacementConfig.fromJson(
+          json['beaconPlacement'] as Map<String, dynamic>?),
     );
   }
 
@@ -166,9 +171,29 @@ class StoreMap {
   /// straight line between the two beacons.
   Edge? edgeBetween(String aId, String bId) {
     for (final edge in edges) {
-      if ((edge.from == aId && edge.to == bId) || (edge.from == bId && edge.to == aId)) return edge;
+      if ((edge.from == aId && edge.to == bId) ||
+          (edge.from == bId && edge.to == aId)) return edge;
     }
     return null;
+  }
+
+  /// Returns the walkable points for [edge], oriented from [fromId].
+  ///
+  /// A usable waypoint path owns the edge geometry. Edges without at least
+  /// two waypoints fall back to their beacon endpoints.
+  List<Offset> edgePath(Edge edge, String fromId) {
+    final from = beaconById(fromId);
+    final toId = edge.from == fromId ? edge.to : edge.from;
+    final to = beaconById(toId);
+    if (from == null || to == null) return const [];
+
+    final points = edge.waypoints.length >= 2
+        ? edge.waypoints
+        : [from.position, to.position];
+    if (edge.waypoints.length < 2 || edge.from == fromId) {
+      return List<Offset>.from(points);
+    }
+    return points.reversed.toList();
   }
 
   /// Adjacency list built from [edges], treated as undirected.
@@ -177,16 +202,20 @@ class StoreMap {
     for (final e in edges) {
       map.putIfAbsent(e.from, () => []).add(e);
       map.putIfAbsent(e.to, () => []).add(
-        Edge(from: e.to, to: e.from, distanceMeters: e.distanceMeters, waypoints: e.waypoints.reversed.toList()),
+            Edge(
+                from: e.to,
+                to: e.from,
+                distanceMeters: e.distanceMeters,
+                waypoints: e.waypoints.reversed.toList()),
           );
     }
     return map;
   }
 
-  /// The closest point to [point] lying on any edge of the corridor graph
-  /// — i.e. map-matching: projects [point] onto the nearest segment of
-  /// each edge's polyline (its two beacon endpoints, bent through any
-  /// [Edge.waypoints] in between), clamped to that segment's endpoints.
+  /// The closest point to [point] lying on any edge of the corridor graph.
+  ///
+  /// When an edge has a usable waypoint path, only waypoint segments are
+  /// projected. Edges without one fall back to their beacon-to-beacon segment.
   /// Used to keep PDR-tracked movement confined to walkable corridors
   /// instead of drifting into room interiors, which have no edges of
   /// their own.
@@ -197,7 +226,8 @@ class StoreMap {
   /// switches corridors when another edge is *meaningfully* closer, not
   /// just marginally closer. The edge actually chosen is returned alongside
   /// the point so the caller can pass it back in as next call's preference.
-  ({Offset point, Edge? edge}) snapToGraph(Offset point, {Edge? preferredEdge}) {
+  ({Offset point, Edge? edge}) snapToGraph(Offset point,
+      {Edge? preferredEdge}) {
     Offset? closest;
     Edge? closestEdge;
     var bestScore = double.infinity;
@@ -205,12 +235,14 @@ class StoreMap {
       final a = beaconById(edge.from)?.position;
       final b = beaconById(edge.to)?.position;
       if (a == null || b == null) continue;
-      final polyline = [a, ...edge.waypoints, b];
+      final polyline = edgePath(edge, edge.from);
       for (var i = 0; i < polyline.length - 1; i++) {
-        final projected = _projectOntoSegment(point, polyline[i], polyline[i + 1]);
+        final projected =
+            _projectOntoSegment(point, polyline[i], polyline[i + 1]);
         var score = (projected - point).distanceSquared;
         if (preferredEdge != null && _sameEdge(edge, preferredEdge)) {
-          score *= 0.5; // Bias toward staying on the corridor already being walked.
+          score *=
+              0.5; // Bias toward staying on the corridor already being walked.
         }
         if (score < bestScore) {
           bestScore = score;
